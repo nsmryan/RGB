@@ -1,0 +1,26 @@
+FOR 3
+  CALL blinken
+LOOP
+DONE
+
+FUNC blinken
+
+  FOR 100
+    ADJUST 1
+    FOR 10
+      ADJUST 0
+    LOOP 0 
+  LOOP 0 
+
+  FOR 100
+    ADJUST -1
+    FOR 10
+      ADJUST 0
+    LOOP 0 
+  LOOP 0 
+
+  FOR 1000
+    ADJUST 0
+  LOOP 0 
+RET
+

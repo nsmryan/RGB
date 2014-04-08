@@ -1,0 +1,10 @@
+main
+: main ' fadeAll 1000 times ;
+
+: fadeAll ' pushGreens fadeEach ' pushReds fadeEach ' pushBlues fadeEach ;
+: pushReds 0 3 6 9 12 ;
+: pushGreens 1 4 7 10 13 ;
+: pushBlues 2 5 8 11 14 ;
+: times for dup call loop drop ;
+: fadeEach 100 for dup call 4 for 1 incr loop 1 wait loop 
+           100 for dup call 4 for 1 dec  loop 1 wait loop drop ;

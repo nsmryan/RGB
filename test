@@ -1,0 +1,4 @@
+' test ' main call done
+: main call ;
+: test 100 for 11 1 incr 2 wait loop
+       100 for 11 1 dec 2 wait loop ;
