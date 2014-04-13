@@ -1,2 +1,19 @@
 
-should add argument stack, so can have single wait for example
+need to sudo apt-get install arduino-core arduino-mk
+
+need to change line to find ard-parse-boards as in:
+http://www.martyndavis.com/?p=335
+
+make compiles
+make upload should load to board
+
+
+
+~90 us to read time from timer
+660 to run 5 fibers
+
+55 bytes per fiber right now
+
+
+2048 bytes memory on arduino
+

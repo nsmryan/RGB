@@ -1,499 +1,482 @@
+#include <Arduino.h>
 #include "TimerOne.h"
 #include <rgb.h>
 
-#define periodHZ 100
-#define dutyCycleResolution 100
-#define usecInSec (1000 * 1000)
-#define periodInUSec (usecInSec / (periodHZ * dutyCycleResolution))
-#define NUM_LEDS 15
-#define USER_INPUT 0
-#define SHIFT_REGISTER 0
 
-#define OE 9
-#define SRCLK 10
-#define RCLK 11
-#define SERPIN 12 
+#define PRINT_RUN_TIME 0
+#define PRINT_STARTUP 1
 
 
-void RGBIsr(void);
-void interpret();
-void setPins();
+void Isr(void);
+bool inner();
+void setPins(char output[NUM_MULTIPLEXERS]);
+void printFiber(int fiberNum);
+void printFibers();
+int availableMemory();
 
-volatile RGBControl rgb = {false, 0, 0, true, 0, 0};
-volatile RGBLed leds[NUM_LEDS];
-ProgState state;
+Fiber fibers[NUM_FIBERS];
+FiberRegisters currentFiber;
+Scheduler scheduler;
+uint8 pins[NUM_FIBERS];
 
 uint16 indicatorLEDOn = true;
 
-extern prog_uint8_t prog[1000] PROGMEM;
+extern prog_uint16_t prog_segments[NUM_FIBERS][PROG_SIZE] PROGMEM;
+extern FiberConfig fiberConfigs[NUM_FIBERS];
 
-//todo- compile time control stack to eliminate loop ptr on ret stack
-//tos in var to reduce ++ and --
-//stack manipulation doesn't work yet.
-//write parser or monad instance (look at operational monad)
-//multiple modes
+//TODO
+//macros for opcode defs
+//user input from hardware
+//eeprom configuration
+//compilation on host
+//hold multiplexers off (using one pin for all) until ready to use.
 
 void setup()
 {
+  int fiberIndex;
+
   pinMode(13, OUTPUT);
-  digitalWrite(13, LOW);
+  digitalWrite(13, HIGH);
+
+  pinMode(MR, OUTPUT);
+  digitalWrite(MR, LOW);
+  digitalWrite(MR, HIGH);
 
   pinMode(OE, OUTPUT);
-  pinMode(SERPIN, OUTPUT);
+  digitalWrite(OE, HIGH);
+
+  pinMode(SEROUT, OUTPUT);
+  digitalWrite(SEROUT, LOW);
+
   pinMode(SRCLK, OUTPUT);
-  pinMode(RCLK, OUTPUT);
+  digitalWrite(SRCLK, LOW);
 
-  for (int i = 0; i < NUM_LEDS; i++)
+  pinMode(STORCLK, OUTPUT);
+  digitalWrite(STORCLK, LOW);
+
+  //TODO change to load from EEEPROM
+
+  for (fiberIndex = 0; fiberIndex < NUM_FIBERS; fiberIndex++)
   {
-    leds[i].ledOn = false;
-    leds[i].dutyCycle = 0;
-    leds[i].newDutyCycle = 0;
+    pins[fiberIndex] = DUTY_CYCLE_RESOLUTION;
+    fibers[fiberIndex].registers.instrPtr = fiberConfigs[fiberIndex].entryPoint;
+    fibers[fiberIndex].registers.retPtr = &fibers[fiberIndex].state.retStack[0];
+    fibers[fiberIndex].registers.paramPtr = &fibers[fiberIndex].state.paramStack[0];
+    fibers[fiberIndex].registers.regA = 0;
+    fibers[fiberIndex].registers.regB = 0;
+    fibers[fiberIndex].registers.output = 0;
   }
-   
-#ifdef SHIFT_REGISTER
-  Timer1.initialize(periodHZ);
-  Timer1.attachInterrupt(RGBIsr);
-#endif
 
-  rgb.minCycle = dutyCycleResolution;
-  rgb.maxCycle = 0;
+  Timer1.initialize(PERIOD_US);
+  Timer1.attachInterrupt(Isr);
+
+  scheduler.done = true;
 
   Serial.begin(9600);
 }
 
-#if USER_INPUT
 void serialEvent()
 {
   int byte = Serial.read();
 
   switch (byte)
   {
-    case '1':
-      leds[0].newDutyCycle += 10;
-      break;
-
-    case '2':
-      leds[1].newDutyCycle += 10;
-      break;
-
-    case '3':
-      leds[2].newDutyCycle += 10;
-      break;
-
-    case 'q':
-      leds[0].newDutyCycle += 1;
-      break;
-
-    case 'w':
-      leds[1].newDutyCycle += 1;
-      break;
-
-    case 'e':
-      leds[2].newDutyCycle += 1;
-      break;
-
-    case 'a':
-      leds[0].newDutyCycle -= 1;
-      break;
-
-    case 's':
-      leds[1].newDutyCycle -= 1;
-      break;
-
-    case 'd':
-      leds[2].newDutyCycle -= 1;
-      break;
-
-    case 'z':
-      leds[0].newDutyCycle -= 10;
-      break;
-
-    case 'x':
-      leds[1].newDutyCycle -= 10;
-      break;
-
-    case 'c':
-      leds[2].newDutyCycle -= 10;
-      break;
-
-    case '8':
-      leds[0].newDutyCycle = 100;
-      break;
-
-    case '9':
-      leds[1].newDutyCycle = 100;
-      break;
-
-    case '0':
-      leds[2].newDutyCycle = 100;
-      break;
-
-    case 'i':
-      leds[0].newDutyCycle = 0;
-      break;
-
-    case 'o':
-      leds[1].newDutyCycle = 0;
-      break;
-
     case 'p':
-      leds[2].newDutyCycle = 0;
+      printFibers();
+      break;
+    
+    case 'm':
+      Serial.print("availableMemory = ");
+      Serial.println(availableMemory());
       break;
 
     default:
       break;
   }
-  for (int i = 0; i < NUM_LEDS; i++)
-  {
-    leds[i].newDutyCycle = max(leds[i].newDutyCycle, 0);
-    leds[i].newDutyCycle = min(leds[i].newDutyCycle, 100);
-    Serial.print(leds[i].newDutyCycle, DEC);
-    Serial.print(" ");
-  }
-  Serial.println();
 }
-#endif
 
 void loop()
 {
-#if USER_INPUT
-  return;
-#elif SHIFT_REGISTER
-  leds[0].ledOn = 1;
-  leds[1].ledOn = 0;
-  leds[2].ledOn = 0;
-  setPins();
-#else
-  if (rgb.sem)
+  int fiberNum;
+  int i;
+
+  if (scheduler.sem)
   {
-    rgb.sem = false;
-    rgb.countPeriods++;
-    rgb.minCycle = dutyCycleResolution;
-    rgb.maxCycle = 0;
+    scheduler.done = false;
+    scheduler.sem = false;
 
-    if (rgb.countPeriods % 100 == 0)
+    if (scheduler.missedTiming)
     {
-      digitalWrite(13, indicatorLEDOn);
-      indicatorLEDOn ^= 1;
+      digitalWrite(13, HIGH);
+    }
+    else
+    {
+      digitalWrite(13, (millis() / 1000) % 2 == 0);
     }
 
-    if (rgb.interpreting)
+    for (fiberNum = 0; fiberNum < NUM_FIBERS; fiberNum++)
     {
-      interpret();
-      //for (int i = 0; i < NUM_LEDS; i++)
-      //{
-      //  rgb.newMaxCycle = max(leds[i].newDutyCycle, rgb.newMaxCycle);
-      //  rgb.newMinCycle = min(leds[i].newDutyCycle, rgb.newMinCycle);
-      //}
+      scheduler.fiberIndex = fiberNum;
+
+      memcpy(&currentFiber,
+             &fibers[fiberNum].registers,
+             sizeof(FiberRegisters));
+
+      while (inner());
+
+      memcpy(&fibers[fiberNum].registers,
+             &currentFiber,
+             sizeof(FiberRegisters));
+      //printFiber(fiberNum);
     }
-  }
+    scheduler.done = true;
+#if PRINT_RUN_TIME
+    Serial.println(Timer1.read());
 #endif
+  }
+  //TODO consider entering low power state until
+  //interrupt wakes us up.
 }
 
-void interpret()
+bool inner()
 {
   uint16 arg, arg2;
-  byte opcode = pgm_read_byte(&prog[state.instrPtr]);
+  uint16 opcode = pgm_read_word(currentFiber.instrPtr);
 
   switch (opcode)
   {
     case DONE_OPCODE:
-      rgb.interpreting = false;
-      for (int i = 0; i < NUM_LEDS; i++)
-      {
-        leds[i].newDutyCycle = 0;
-      }
-      return;
+      return false;
       break;
 
     case RET_OPCODE:
-      state.retPtr--;
-      state.instrPtr = state.retStack[state.retPtr];
+      currentFiber.retPtr--;
+      currentFiber.instrPtr = *currentFiber.retPtr;
       break;
 
     case LOOP_OPCODE:
-      state.retPtr--;
-      arg = state.retStack[state.retPtr];
+      arg = (uint16)*(currentFiber.retPtr - 1);
       if (arg == 0)
       {
-        state.instrPtr++;
-        state.retPtr--;
+        currentFiber.instrPtr++;
+        currentFiber.retPtr -= 2;
       }
       else
       {
-        state.retStack[state.retPtr]--;
-        state.retPtr++;
-        state.instrPtr = state.retStack[state.retPtr - 2];
+        *(currentFiber.retPtr - 1) = (prog_uint16_t*)(arg-1);
+        currentFiber.instrPtr = (prog_uint16_t*)*(currentFiber.retPtr - 2);
       }
       break;
 
     case FOR_OPCODE:
-      state.paramPtr--;
-      arg = state.paramStack[state.paramPtr];
-      state.instrPtr++;
-      state.retStack[state.retPtr] = state.instrPtr;
-      state.retPtr++;
-      state.retStack[state.retPtr] = arg;
-      state.retPtr++;
+      currentFiber.paramPtr--;
+      arg = *currentFiber.paramPtr;
+      currentFiber.instrPtr++;
+      *currentFiber.retPtr = currentFiber.instrPtr;
+      currentFiber.retPtr++;
+      *currentFiber.retPtr = (prog_uint16_t*)arg;
+      currentFiber.retPtr++;
       break;
 
     case CALL_OPCODE:
-      state.paramPtr--;
-      arg = state.paramStack[state.paramPtr];
-      state.retStack[state.retPtr] = state.instrPtr + 1;
-      state.retPtr++;
-      state.instrPtr = arg;
+      currentFiber.paramPtr--;
+      arg = *currentFiber.paramPtr;
+      *currentFiber.retPtr = currentFiber.instrPtr + 1;
+      currentFiber.retPtr++;
+      currentFiber.instrPtr = (prog_uint16_t*)arg;
       break;
 
     case INCR_OPCODE:
-      state.paramPtr--;
-      arg = state.paramStack[state.paramPtr];
-      state.paramPtr--;
-      arg2 = state.paramStack[state.paramPtr];
-      leds[arg2].newDutyCycle += arg;
-      leds[arg2].newDutyCycle = min(leds[arg2].newDutyCycle, dutyCycleResolution);
-      state.instrPtr++;
+      arg = *(currentFiber.paramPtr-1);
+      *(currentFiber.paramPtr-1) = arg+1;
+      currentFiber.instrPtr++;
       break;
 
     case DEC_OPCODE:
-      state.paramPtr--;
-      arg = state.paramStack[state.paramPtr];
-      state.paramPtr--;
-      arg2 = state.paramStack[state.paramPtr];
-      leds[arg2].newDutyCycle -= arg;
-      leds[arg2].newDutyCycle = max(leds[arg2].newDutyCycle, 0);
-      state.instrPtr++;
+      arg = *(currentFiber.paramPtr-1);
+      *(currentFiber.paramPtr-1) = arg-1;
+      currentFiber.instrPtr++;
       break;
 
-    case SET_OPCODE:
-      state.paramPtr--;
-      arg = state.paramStack[state.paramPtr];
-      state.paramPtr--;
-      arg2 = state.paramStack[state.paramPtr];
-      leds[arg2].newDutyCycle = arg;
-      state.instrPtr++;
+    case OUTPUT_OPCODE:
+      currentFiber.paramPtr--;
+      arg = *currentFiber.paramPtr;
+      currentFiber.output = arg;
+      currentFiber.instrPtr++;
       break;
 
     case WAIT_OPCODE:
-      state.paramPtr--;
-      arg = state.paramStack[state.paramPtr];
+      arg = *(currentFiber.paramPtr-1);
       if (arg == 0)
       {
-        state.instrPtr++;
+        currentFiber.paramPtr--;
+        currentFiber.instrPtr++;
       }
       else
       {
-        state.paramStack[state.paramPtr] -= 1;
-        state.paramPtr++;
-        return;
+        *(currentFiber.paramPtr-1) = arg-1;
       }
+      return false;
       break;
 
     case DUP_OPCODE:
-      arg = state.paramStack[state.paramPtr-1];
-      state.paramStack[state.paramPtr] = arg;
-      state.paramPtr++;
-      state.instrPtr++;
+      arg = *(currentFiber.paramPtr - 1);
+      *currentFiber.paramPtr = arg;
+      currentFiber.paramPtr++;
+      currentFiber.instrPtr++;
       break;
 
     case DROP_OPCODE:
-      state.paramPtr--;
-      state.instrPtr++;
+      currentFiber.paramPtr--;
+      currentFiber.instrPtr++;
       break;
 
     case SWAP_OPCODE:
-      arg = state.paramStack[state.paramPtr-1];
-      state.paramStack[state.paramPtr-1] = state.paramStack[state.paramPtr-2];
-      state.paramStack[state.paramPtr-2] = arg;
-      state.instrPtr++;
+      arg = *(currentFiber.paramPtr - 1);
+      *(currentFiber.paramPtr - 1) = *(currentFiber.paramPtr - 2);
+      *(currentFiber.paramPtr - 2) = arg;
+      currentFiber.instrPtr++;
       break;
 
     case YIELD_OPCODE:
-      return;
+      currentFiber.instrPtr++;
+      return false;
       break;
 
     case TOA_OPCODE:
-      arg = state.paramStack[state.paramPtr-1];
-      state.regA = arg;
-      state.instrPtr++;
+      arg = *(--currentFiber.paramPtr);
+      currentFiber.regA = arg;
+      currentFiber.instrPtr++;
       break;
 
     case FROMA_OPCODE:
-      arg = state.regA;
-      state.paramStack[state.paramPtr] = arg;
-      state.paramPtr++;
-      state.instrPtr++;
+      arg = currentFiber.regA;
+      *currentFiber.paramPtr = arg;
+      currentFiber.paramPtr++;
+      currentFiber.instrPtr++;
       break;
 
     case ADD_OPCODE:
-      state.paramPtr--;
-      arg = state.paramStack[state.paramPtr];
-      arg2 = state.paramStack[state.paramPtr-1];
-      state.paramStack[state.paramPtr-1] = arg + arg2;
-      state.instrPtr++;
+      currentFiber.paramPtr--;
+      arg = *currentFiber.paramPtr;
+      arg2 = *(currentFiber.paramPtr--);
+      *currentFiber.paramPtr = arg + arg2;
+      currentFiber.instrPtr++;
       break;
 
     case SUB_OPCODE:
-      state.paramPtr--;
-      arg = state.paramStack[state.paramPtr];
-      arg2 = state.paramStack[state.paramPtr-1];
-      state.paramStack[state.paramPtr-1] = arg2 - arg;
-      state.instrPtr++;
+      currentFiber.paramPtr--;
+      arg = *currentFiber.paramPtr;
+      arg2 = *(currentFiber.paramPtr - 1);
+      *(currentFiber.paramPtr - 1) = arg2 - arg;
+      currentFiber.instrPtr++;
       break;
 
     case MULT_OPCODE:
-      state.paramPtr--;
-      arg = state.paramStack[state.paramPtr];
-      arg2 = state.paramStack[state.paramPtr - 1];
-      state.paramStack[state.paramPtr - 1] = arg * arg2;
-      state.instrPtr++;
+      currentFiber.paramPtr--;
+      arg = *currentFiber.paramPtr;
+      arg2 = *(currentFiber.paramPtr - 1);
+      *(currentFiber.paramPtr - 1) = arg * arg2;
+      currentFiber.instrPtr++;
       break;
 
     case MOD_OPCODE:
-      state.paramPtr--;
-      arg = state.paramStack[state.paramPtr];
-      arg2 = state.paramStack[state.paramPtr - 1];
-      state.paramStack[state.paramPtr - 1] = arg2 % arg;
-      state.instrPtr++;
+      currentFiber.paramPtr--;
+      arg = *currentFiber.paramPtr;
+      arg2 = *(currentFiber.paramPtr - 1);
+      *(currentFiber.paramPtr - 1) = arg2 % arg;
+      currentFiber.instrPtr++;
       break;
 
     case NIP_OPCODE:
-      state.paramPtr--;
-      arg = state.paramStack[state.paramPtr];
-      state.paramStack[state.paramPtr - 1] = arg;
-      state.instrPtr++;
+      currentFiber.paramPtr--;
+      arg = *currentFiber.paramPtr;
+      *(currentFiber.paramPtr - 1) = arg;
+      currentFiber.instrPtr++;
       break;
 
     case IF_OPCODE:
-      state.paramPtr--;
-      arg = state.paramStack[state.paramPtr];
-      state.paramPtr--;
-      arg2 = state.paramStack[state.paramPtr];
+      currentFiber.paramPtr--;
+      arg = *currentFiber.paramPtr;
+      currentFiber.paramPtr--;
+      arg2 = *currentFiber.paramPtr;
       if (arg2)
       {
-        state.retStack[state.retPtr] = state.instrPtr + 1;
-        state.retPtr++;
-        state.instrPtr = arg;
+        currentFiber.instrPtr++;
       }
       else
       {
-        state.instrPtr++;
+        currentFiber.instrPtr += arg;
       }
       break;
 
     case GT_OPCODE:
-      state.paramPtr--;
-      arg = state.paramStack[state.paramPtr];
-      arg2 = state.paramStack[state.paramPtr - 1];
-      state.paramStack[state.paramPtr - 1] = arg2 > arg;
-      state.instrPtr++;
+      currentFiber.paramPtr--;
+      arg = *currentFiber.paramPtr;
+      arg2 = *(currentFiber.paramPtr - 1);
+      *(currentFiber.paramPtr - 1) = arg2 > arg;
+      currentFiber.instrPtr++;
       break;
 
     case LT_OPCODE:
-      state.paramPtr--;
-      arg = state.paramStack[state.paramPtr];
-      arg2 = state.paramStack[state.paramPtr - 1];
-      state.paramStack[state.paramPtr - 1] = arg2 < arg;
-      state.instrPtr++;
+      currentFiber.paramPtr--;
+      arg = *currentFiber.paramPtr;
+      arg2 = *(currentFiber.paramPtr - 1);
+      *(currentFiber.paramPtr - 1) = arg2 < arg;
+      currentFiber.instrPtr++;
       break;
 
     case EQ_OPCODE:
-      state.paramPtr--;
-      arg = state.paramStack[state.paramPtr];
-      arg2 = state.paramStack[state.paramPtr - 1];
-      state.paramStack[state.paramPtr - 1] = arg2 == arg;
-      state.instrPtr++;
+      currentFiber.paramPtr--;
+      arg = *currentFiber.paramPtr;
+      arg2 = *(currentFiber.paramPtr - 1);
+      *(currentFiber.paramPtr - 1) = arg2 == arg;
+      currentFiber.instrPtr++;
       break;
 
-    case IFELSE_OPCODE:
-      state.paramPtr--;
-      arg = state.paramStack[state.paramPtr];
-      state.paramPtr--;
-      arg2 = state.paramStack[state.paramPtr];
-      state.paramPtr--;
-      if (state.paramStack[state.paramPtr])
-      {
-        state.retStack[state.retPtr] = state.instrPtr + 1;
-        state.retPtr++;
-        state.instrPtr = arg;
-      }
-      else
-      {
-        state.retStack[state.retPtr] = state.instrPtr + 1;
-        state.retPtr++;
-        state.instrPtr = arg;
-      }
+    case EVER_OPCODE:
+      currentFiber.instrPtr = (prog_uint16_t*)*(currentFiber.retPtr - 2);
+      break;
+
+    case TOB_OPCODE:
+      arg = *(--currentFiber.paramPtr);
+      currentFiber.regB = arg;
+      currentFiber.instrPtr++;
+      break;
+
+    case FROMB_OPCODE:
+      *(currentFiber.paramPtr++) = currentFiber.regB;
+      currentFiber.instrPtr++;
+      break;
+
+    case THEN_OPCODE:
+      currentFiber.instrPtr++;
       break;
 
     default:
-      arg = pgm_read_word((prog_uint16_t*)&prog[state.instrPtr]);
-      state.paramStack[state.paramPtr] = arg;
-      state.paramPtr++;
-      state.instrPtr += 2;
+      *currentFiber.paramPtr = opcode;
+      currentFiber.paramPtr++;
+      currentFiber.instrPtr++;
   }
-  interpret();
+
+  return true;
 }
 
-void setPins()
+void printFiber(int fiberNum)
 {
-  int i;
+  int stackIndex;
 
-  digitalWrite(RCLK, LOW);
-  digitalWrite(OE, HIGH);
+  Serial.println();
+  Serial.print(fiberNum);
+  Serial.println(":");
+  Serial.print("ps = ");
+  Serial.print((uint16)fibers[fiberNum].registers.paramPtr);
+  Serial.print(" rs = ");
+  Serial.print((uint16)fibers[fiberNum].registers.retPtr);
+  Serial.print(" ip = ");
+  Serial.print((uint16)fibers[fiberNum].registers.instrPtr);
+  Serial.print(" output = ");
+  Serial.println((uint16)fibers[fiberNum].registers.output);
 
-  for (i = 0; i < NUM_LEDS; i++)
+  for (stackIndex = 0; stackIndex < PS_STACK_DEPTH; stackIndex++)
   {
-    digitalWrite(SRCLK, LOW);
-
-    digitalWrite(SERPIN, leds[i].ledOn);
-
-    digitalWrite(SRCLK, HIGH);
+    Serial.print(" ");
+    Serial.print(fibers[fiberNum].state.paramStack[stackIndex]);
   }
-  digitalWrite(OE, LOW);
-  digitalWrite(RCLK, HIGH);
+
+  Serial.println();
+
+  for (stackIndex = 0; stackIndex < RS_STACK_DEPTH; stackIndex++)
+  {
+    Serial.print(" ");
+    Serial.print((uint16)fibers[fiberNum].state.retStack[stackIndex]);
+  }
 }
 
-void RGBIsr(void)
+void printFibers()
+{
+  int fiberIndex;
+
+  for (fiberIndex = 0; fiberIndex < NUM_FIBERS; fiberIndex++)
+  {
+    printFiber(fiberIndex);
+    Serial.println();
+  }
+}
+
+int availableMemory()
+{
+  // Use 1024 with ATmega168
+  int size = 2048;
+  byte *buf;
+  while ((buf = (byte *) malloc(--size)) == NULL);
+      free(buf);
+  return size;
+}
+
+void setPins(char outputs[NUM_MULTIPLEXERS])
 {
   int i;
-  int changed = false;
+  int mux;
+  char outBit;
 
-  if (rgb.ticks >= dutyCycleResolution)
+  digitalWrite(STORCLK, LOW); //storage register clock
+
+  for (i = 0; i < 8 * NUM_MULTIPLEXERS; i++)
   {
-    rgb.ticks = 0;
-    rgb.sem = true;
-    rgb.maxCycle = rgb.newMaxCycle;
-    rgb.minCycle = rgb.newMinCycle;
+    outBit = 1 & (outputs[i / NUM_PINS_PER_MUX] >> (i % NUM_PINS_PER_MUX));
 
-    for (i = 0; i < NUM_LEDS; i++)
+    digitalWrite(SRCLK, LOW); //go low on clock
+
+    digitalWrite(SEROUT, outBit); //send bit
+
+    digitalWrite(SRCLK, HIGH); //rising edge commits bit
+
+    digitalWrite(SEROUT, 0); //from tutorial, prevents "bleed through"
+  }
+
+  digitalWrite(OE, HIGH);     //output off
+  digitalWrite(STORCLK, HIGH);//storage register commit bits
+  digitalWrite(OE, LOW);      //output enable
+}
+
+void Isr(void)
+{
+  int fiberIndex;
+  char mux;
+  char outputs[NUM_MULTIPLEXERS] = {};
+
+  if ((scheduler.ticks % DUTY_CYCLE_RESOLUTION) == 0)
+  {
+    if (!scheduler.done)
     {
-      if (leds[i].newDutyCycle > 0)
+      scheduler.missedTiming = true;
+    }
+
+    scheduler.sem = true;
+    scheduler.ticks = 0;
+    scheduler.epochs++;
+
+    for (fiberIndex = 0; fiberIndex < NUM_FIBERS; fiberIndex++)
+    {
+      pins[fiberIndex] = fibers[fiberIndex].registers.output;
+    }
+  }
+
+  fiberIndex = 0;
+  for (mux = 0; mux < NUM_MULTIPLEXERS; mux++)
+  {
+    for (; fiberIndex < ((mux+1) * NUM_PINS_PER_MUX); fiberIndex++)
+    {
+      outputs[mux] <<= 1;
+      if (scheduler.ticks < pins[fiberIndex])
       {
-        leds[i].ledOn = true;
+        outputs[mux] |= 1;
       }
-      leds[i].dutyCycle = leds[i].newDutyCycle;
-    }
-    setPins();
-  }
-/*
-  if (rgb.ticks < rgb.minCycle || rgb.ticks > rgb.maxCycle)
-  {
-    rgb.ticks++;
-    return;
-  }
-*/
-  for (i = 0; i < NUM_LEDS; i++)
-  {
-    if (leds[i].ledOn && rgb.ticks >= leds[i].dutyCycle)
-    {
-      leds[i].ledOn = false;
-      changed = true;
     }
   }
-  if (changed)
-  {
-    setPins();
-  }
-  rgb.ticks++;
+  setPins(outputs);
+
+  scheduler.ticks++;
 }
 

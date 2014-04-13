@@ -1,9 +1,9 @@
 ARDUINO_DIR = /usr/share/arduino
 BOARD_TAG = uno
-\ ARDUINO_PORT = /dev/ttyACM0
+ARDUINO_PORT = /dev/ttyACM0
 ARD_PORT = /dev/ttyACM*
 ARDUINO_LIBS = EEPROM
-include /home/noah/Documents/RGB/Arduino.mk
+include /usr/share/arduino/Arduino.mk
 TARGET = RGB
 
 AVR_TOOLS_PATH = /usr/bin
