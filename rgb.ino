@@ -9,7 +9,7 @@
 
 void Isr(void);
 bool inner();
-void setPins(char output[NUM_MULTIPLEXERS]);
+void setPins();
 void printFiber(int fiberNum);
 void printFibers();
 int availableMemory();
@@ -17,19 +17,21 @@ int availableMemory();
 Fiber fibers[NUM_FIBERS];
 FiberRegisters currentFiber;
 Scheduler scheduler;
-uint8 pins[NUM_FIBERS];
+Output outs[NUM_FIBERS];
+uint8 masks[9] = {0x00, 0x01, 0x03, 0x07, 0x0F, 0x1F, 0x3F, 0x7F, 0xFF};
+uint8 currentOutputs[NUM_SHIFT_REGS];
 
 uint16 indicatorLEDOn = true;
 
 extern prog_uint16_t prog_segments[NUM_FIBERS][PROG_SIZE] PROGMEM;
-extern FiberConfig fiberConfigs[NUM_FIBERS];
+extern prog_uint16_t fiberOffset[NUM_FIBERS] PROGMEM;
+extern prog_uint8_t fiberBitsUsed[NUM_FIBERS] PROGMEM;
 
 //TODO
 //macros for opcode defs
 //user input from hardware
 //eeprom configuration
 //compilation on host
-//hold multiplexers off (using one pin for all) until ready to use.
 
 void setup()
 {
@@ -38,46 +40,52 @@ void setup()
   pinMode(13, OUTPUT);
   digitalWrite(13, HIGH);
 
-  pinMode(MR, OUTPUT);
-  digitalWrite(MR, LOW);
-  digitalWrite(MR, HIGH);
+  pinMode(MR_PIN_NUM, OUTPUT);
+  digitalWrite(MR_PIN_NUM, LOW);
+  digitalWrite(MR_PIN_NUM, HIGH);
 
-  pinMode(OE, OUTPUT);
-  digitalWrite(OE, HIGH);
+  pinMode(OE_PIN_NUM, OUTPUT);
+  digitalWrite(OE_PIN_NUM, HIGH);
 
-  pinMode(SEROUT, OUTPUT);
-  digitalWrite(SEROUT, LOW);
+  pinMode(SEROUT_PIN_NUM, OUTPUT);
+  digitalWrite(SEROUT_PIN_NUM, LOW);
 
-  pinMode(SRCLK, OUTPUT);
-  digitalWrite(SRCLK, LOW);
+  pinMode(SRCLK_PIN_NUM, OUTPUT);
+  digitalWrite(SRCLK_PIN_NUM, LOW);
 
-  pinMode(STORCLK, OUTPUT);
-  digitalWrite(STORCLK, LOW);
+  pinMode(STORCLK_PIN_NUM, OUTPUT);
+  digitalWrite(STORCLK_PIN_NUM, LOW);
+
+  Serial.begin(9600);
 
   //TODO change to load from EEEPROM
 
   for (fiberIndex = 0; fiberIndex < NUM_FIBERS; fiberIndex++)
   {
-    pins[fiberIndex] = DUTY_CYCLE_RESOLUTION;
-    fibers[fiberIndex].registers.instrPtr = fiberConfigs[fiberIndex].entryPoint;
+    fibers[fiberIndex].registers.instrPtr = (prog_uint16_t*)pgm_read_word(&fiberOffset[fiberIndex]);
     fibers[fiberIndex].registers.retPtr = &fibers[fiberIndex].state.retStack[0];
     fibers[fiberIndex].registers.paramPtr = &fibers[fiberIndex].state.paramStack[0];
     fibers[fiberIndex].registers.regA = 0;
     fibers[fiberIndex].registers.regB = 0;
     fibers[fiberIndex].registers.output = 0;
+    fibers[fiberIndex].registers.pwm = 0;
+
+    outs[fiberIndex].pwm = 0;
+    outs[fiberIndex].output = 0;
   }
 
   Timer1.initialize(PERIOD_US);
   Timer1.attachInterrupt(Isr);
 
   scheduler.done = true;
-
-  Serial.begin(9600);
 }
 
 void serialEvent()
 {
   int byte = Serial.read();
+
+  if (byte == -1)
+    return;
 
   switch (byte)
   {
@@ -90,7 +98,20 @@ void serialEvent()
       Serial.println(availableMemory());
       break;
 
+    case 't':
+      Serial.print("uptime = ");
+      Serial.print(" seconds = ");
+      Serial.print(scheduler.frames);
+      Serial.print(", ms = ");
+      Serial.print(scheduler.subframes * DUTY_CYCLE_RESOLUTION);
+      Serial.print(", us = ");
+      Serial.print(scheduler.ticks);
+      Serial.println();
+      break;
+
     default:
+      Serial.print("unexpected input = ");
+      Serial.println((char*)&byte);
       break;
   }
 }
@@ -114,6 +135,7 @@ void loop()
       digitalWrite(13, (millis() / 1000) % 2 == 0);
     }
 
+    Serial.println("outputs");
     for (fiberNum = 0; fiberNum < NUM_FIBERS; fiberNum++)
     {
       scheduler.fiberIndex = fiberNum;
@@ -128,8 +150,21 @@ void loop()
              &currentFiber,
              sizeof(FiberRegisters));
       //printFiber(fiberNum);
+      //Serial.println();
+      //Serial.print(outs[fiberNum].output);
     }
+    //Serial.println();
+
+    //Serial.println("Current Output");
+    //for (i = 0; i < 2; i++)
+    //{
+    //  Serial.print((unsigned int)currentOutputs[2 - i - 1], HEX);
+    //}
+    //Serial.println("");
+
     scheduler.done = true;
+
+
 #if PRINT_RUN_TIME
     Serial.println(Timer1.read());
 #endif
@@ -353,6 +388,29 @@ bool inner()
       currentFiber.instrPtr++;
       break;
 
+    case SET_PWM_OPCODE:
+      currentFiber.paramPtr--;
+      arg = *currentFiber.paramPtr;
+      currentFiber.pwm = arg;
+      currentFiber.instrPtr++;
+      break;
+
+    case LSHIFT_OPCODE:
+      currentFiber.paramPtr--;
+      arg = *currentFiber.paramPtr;
+      arg2 = *(currentFiber.paramPtr - 1);
+      *(currentFiber.paramPtr - 1) = arg2 << arg;
+      currentFiber.instrPtr++;
+      break;
+
+    case RSHIFT_OPCODE:
+      currentFiber.paramPtr--;
+      arg = *currentFiber.paramPtr;
+      arg2 = *(currentFiber.paramPtr - 1);
+      *(currentFiber.paramPtr - 1) = arg2 >> arg;
+      currentFiber.instrPtr++;
+      break;
+
     default:
       *currentFiber.paramPtr = opcode;
       currentFiber.paramPtr++;
@@ -414,37 +472,54 @@ int availableMemory()
   return size;
 }
 
-void setPins(char outputs[NUM_MULTIPLEXERS])
+void setPins()
 {
-  int i;
+  int shiftReg;
+  int bitIndex;
   int mux;
   char outBit;
 
-  digitalWrite(STORCLK, LOW); //storage register clock
+  //storage register low, clock low.
+  CLEAR_PINS_0_7(STORCLK | SRCLK);
 
-  for (i = 0; i < 8 * NUM_MULTIPLEXERS; i++)
+  for (shiftReg = 0; shiftReg < NUM_SHIFT_REGS; shiftReg++)
   {
-    outBit = 1 & (outputs[i / NUM_PINS_PER_MUX] >> (i % NUM_PINS_PER_MUX));
+    for (bitIndex = 0; bitIndex < 8; bitIndex++)
+    {
+      outBit = 1 &
+               (currentOutputs[NUM_SHIFT_REGS - shiftReg - 1] >>
+                8 - bitIndex - 1);
 
-    digitalWrite(SRCLK, LOW); //go low on clock
+      //Set serial input line.
+      if (outBit)
+      {
+        SET_PINS_0_7(SEROUT);
+      }
+      else
+      {
+        CLEAR_PINS_0_7(SEROUT);
+      }
 
-    digitalWrite(SEROUT, outBit); //send bit
+      SET_PINS_0_7(SRCLK); //rising edge commits bit
+      CLEAR_PINS_0_7(SRCLK); //go low on clock
 
-    digitalWrite(SRCLK, HIGH); //rising edge commits bit
-
-    digitalWrite(SEROUT, 0); //from tutorial, prevents "bleed through"
+      CLEAR_PINS_0_7(SEROUT); //from tutorial, prevents "bleed through"
+    }
   }
 
-  digitalWrite(OE, HIGH);     //output off
-  digitalWrite(STORCLK, HIGH);//storage register commit bits
-  digitalWrite(OE, LOW);      //output enable
+  SET_PINS_0_7(OE);      //output off
+  SET_PINS_0_7(STORCLK); //storage register commit bits
+  CLEAR_PINS_0_7(OE);    //output enable
 }
 
 void Isr(void)
 {
   int fiberIndex;
-  char mux;
-  char outputs[NUM_MULTIPLEXERS] = {};
+  char shiftIndex;
+  char outputIndex;
+  char bitsUsed;
+  char bitsLeft;
+  char output;
 
   if ((scheduler.ticks % DUTY_CYCLE_RESOLUTION) == 0)
   {
@@ -455,27 +530,78 @@ void Isr(void)
 
     scheduler.sem = true;
     scheduler.ticks = 0;
-    scheduler.epochs++;
+    scheduler.subframes++;
+
+    if ((scheduler.subframes * DUTY_CYCLE_RESOLUTION) % PERIOD_US == 0)
+    {
+      scheduler.frames++;
+      scheduler.subframes = 0;
+    }
 
     for (fiberIndex = 0; fiberIndex < NUM_FIBERS; fiberIndex++)
     {
-      pins[fiberIndex] = fibers[fiberIndex].registers.output;
+      outs[fiberIndex].pwm    = fibers[fiberIndex].registers.pwm;
+      outs[fiberIndex].output = fibers[fiberIndex].registers.output;
     }
   }
 
-  fiberIndex = 0;
-  for (mux = 0; mux < NUM_MULTIPLEXERS; mux++)
+  outputIndex = NUM_SHIFT_REGS - 1;
+  bitsLeft = 8;
+  for (fiberIndex = 0; fiberIndex < NUM_FIBERS; fiberIndex++)
   {
-    for (; fiberIndex < ((mux+1) * NUM_PINS_PER_MUX); fiberIndex++)
+    bitsUsed = (uint16)pgm_read_word(&fiberBitsUsed[fiberIndex]);
+
+    if (bitsUsed == 0)
     {
-      outputs[mux] <<= 1;
-      if (scheduler.ticks < pins[fiberIndex])
-      {
-        outputs[mux] |= 1;
-      }
+      //Fiber doesn't use any output bits.
+      continue;
+    }
+
+    output = 0;
+
+    if ((bitsUsed | SKIP_BIT) == SKIP_BIT)
+    {
+      //These bits are unused and should be skipped by
+      //filling them with 0s.
+      bitsUsed &= MASK_OUT_SKIP_BIT;
+    }
+    else if (scheduler.ticks < outs[fiberIndex].pwm)
+    {
+      //Fiber is currently "on" in PWM cycle.
+      output = outs[fiberIndex].output;
+    }
+    //else use the default output of 0.
+
+    //fit bitsUsed into outputs.
+    while (bitsUsed > bitsLeft)
+    {
+      currentOutputs[outputIndex] <<= bitsLeft;
+      currentOutputs[outputIndex] |=
+        ((output >> bitsUsed-bitsLeft) &
+         masks[bitsLeft]);
+      bitsUsed -= bitsLeft;
+      //output >>= bitsLeft;
+      bitsLeft = 8;
+      outputIndex--;
+    }
+
+    //have we used up our bits?
+    if (bitsUsed != 0)
+    {
+      //partial output byte left to fill.
+      currentOutputs[outputIndex] <<= bitsUsed;
+      currentOutputs[outputIndex] |= (output & masks[bitsUsed]);
+      bitsLeft -= bitsUsed;
+    }
+
+    if (bitsLeft == 0)
+    {
+      bitsLeft = 8;
+      outputIndex--;
     }
   }
-  setPins(outputs);
+
+  setPins();
 
   scheduler.ticks++;
 }

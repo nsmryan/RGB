@@ -1,28 +1,64 @@
 #define PERIOD_HZ 1000
 #define PERIOD_US 1000
-#define DUTY_CYCLE_RESOLUTION 16
-#define NUM_FIBERS 16
+#define DUTY_CYCLE_RESOLUTION 20
+#define NUM_FIBERS 6
 #define NUM_PINS_PER_MUX 8
+#define LED_OFF 0
+#define LED_ON DUTY_CYCLE_RESOLUTION
 
-#define NUM_MULTIPLEXERS 2
+#define NUM_SHIFT_REGS 2
+
+//0 and 1 ommited as they are reserved for serial communication.
+#define PIN_2 (B00000100)
+#define PIN_3 (B00001000)
+#define PIN_4 (B00010000)
+#define PIN_5 (B00100000)
+#define PIN_6 (B01000000)
+#define PIN_7 (B10000000)
+#define SET_PINS_0_7(bits) (PORTD = PORTD | (bits & B11111100))
+#define CLEAR_PINS_0_7(bits) (PORTD = PORTD & ~(bits & B11111100))
+#define GET_PINS_0_7 PIND
+
+//6 and 7 ommited as they are reserved the crystal oscillator.
+#define PIN_0 (B00000001)
+#define PIN_1 (B00000010)
+#define PIN_2 (B00000100)
+#define PIN_3 (B00001000)
+#define PIN_4 (B00010000)
+#define PIN_5 (B00100000)
+#define SET_PINS_8_13(bits) (PORTB = PORTB | (bits & B00111111))
+#define CLEAR_PINS_8_13(bits) (PORTB = PORTB & ~(bits & B00111111))
+#define GET_PINS_8_13 PINB
+
 
 //Output enable (active low)
-#define OE 6
+#define OE_PIN_NUM 6
+#define OE PIN_6
 
 //Shift register clock
-#define SRCLK 3
+#define SRCLK_PIN_NUM 3
+#define SRCLK PIN_3
 
 //Storage Register Clock
-#define STORCLK 4
+#define STORCLK_PIN_NUM 4
+#define STORCLK PIN_4
 
 //Master Reset
-#define MR 5
+#define MR_PIN_NUM 5
+#define MR PIN_5
 
 //Serial out
-#define SEROUT 2
+#define SEROUT_PIN_NUM 2
+#define SEROUT PIN_2
 
-#define MSB_BYTE 0x80
-#define OPCODE_BIT MSB_BYTE
+//High bit in word indicates it is an opcode,
+//not a literal number.
+#define MSB_WORD 0x8000
+#define OPCODE_BIT MSB_WORD
+
+#define SKIP_BIT 0x80
+#define SKIP_BITS(bits) (bits | SKIP_BIT)
+#define MASK_OUT_SKIP_BIT 0x7F
 
 #define PROG_SIZE 100
 
@@ -56,9 +92,12 @@
 #define TOB_OPCODE     (OPCODE_BIT | 27)
 #define FROMB_OPCODE   (OPCODE_BIT | 28)
 #define THEN_OPCODE    (OPCODE_BIT | 29)
+#define SET_PWM_OPCODE (OPCODE_BIT | 30)
+#define LSHIFT_OPCODE  (OPCODE_BIT | 31)
+#define RSHIFT_OPCODE  (OPCODE_BIT | 32)
 
-#define PS_STACK_DEPTH 10
-#define RS_STACK_DEPTH 10
+#define PS_STACK_DEPTH 50
+#define RS_STACK_DEPTH 50
 
 
 typedef char uint8;
@@ -69,7 +108,8 @@ typedef int int16;
 typedef struct
 {
   uint16 ticks;
-  uint16 epochs;
+  uint16 subframes;
+  uint16 frames;
   uint8 sem;
   uint8 done;
   uint8 missedTiming;
@@ -95,7 +135,7 @@ typedef struct
   uint16 *paramPtr;
   uint16 regA;
   uint16 regB;
-  uint8  output;
+  uint16  output;
   uint8  pwm;
 } FiberRegisters;
 
@@ -105,3 +145,8 @@ typedef struct
   FiberState state;
 } Fiber;
 
+typedef struct
+{
+  uint16 pwm;
+  uint16 output;
+} Output;
