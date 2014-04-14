@@ -1,6 +1,7 @@
 #define PERIOD_HZ 1000
 #define PERIOD_US 1000
 #define DUTY_CYCLE_RESOLUTION 20
+#define FRAMES_PER_SECOND (PERIOD_HZ / DUTY_CYCLE_RESOLUTION)
 #define NUM_FIBERS 6
 #define NUM_PINS_PER_MUX 8
 #define LED_OFF 0
@@ -30,6 +31,16 @@
 #define CLEAR_PINS_8_13(bits) (PORTB = PORTB & ~(bits & B00111111))
 #define GET_PINS_8_13 PINB
 
+#define LED_7_SEG_0 B0001000
+#define LED_7_SEG_1 B1011011
+#define LED_7_SEG_2 B0100010
+#define LED_7_SEG_3 B0010010
+#define LED_7_SEG_4 B1010001
+#define LED_7_SEG_5 B0010100
+#define LED_7_SEG_6 B0000100
+#define LED_7_SEG_7 B1011010
+#define LED_7_SEG_8 B0000000
+#define LED_7_SEG_9 B0010000
 
 //Output enable (active low)
 #define OE_PIN_NUM 6
@@ -91,10 +102,12 @@
 #define EVER_OPCODE    (OPCODE_BIT | 26)
 #define TOB_OPCODE     (OPCODE_BIT | 27)
 #define FROMB_OPCODE   (OPCODE_BIT | 28)
-#define THEN_OPCODE    (OPCODE_BIT | 29)
+
 #define SET_PWM_OPCODE (OPCODE_BIT | 30)
 #define LSHIFT_OPCODE  (OPCODE_BIT | 31)
 #define RSHIFT_OPCODE  (OPCODE_BIT | 32)
+#define REPEAT_OPCODE  (OPCODE_BIT | 33)
+#define BEGIN_OPCODE   (OPCODE_BIT | 34)
 
 #define PS_STACK_DEPTH 50
 #define RS_STACK_DEPTH 50

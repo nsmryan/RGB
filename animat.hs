@@ -1,21 +1,43 @@
-import Data.List
+{-# LANGUAGE GADTs, Rank2Types, FlexibleInstances #-}
+
+module Main where
+
+import Control.Monad
+import Control.Monad.Operational
+import Control.Monad.Trans
+import Control.Monad.Identity
+import Control.Monad.Reader
+import Control.Monad.Writer.Lazy
+
+import Debug.Trace
+
 import Data.Maybe
+import Data.List
 import Data.Bits
 import System.Environment
 import Control.Monad.State.Strict
 import Control.Applicative
-import qualified Data.Map as M
+--import qualified Data.Map as M
 import qualified Text.ParserCombinators.Parsec as P
 
 type Sym = String
 
+--type NameMap = M.Map String Int
+type NameMap = [(String, Int)]
+
+data CompState = CompState 
+               {
+                 compiledProgram :: String
+               , offset :: Int
+               , nameMap :: NameMap
+               } deriving (Show)
+
 data Instr = For
            | Incr
            | Dec
-           | Func Sym
            | Call
            | Loop
-           | Return
+           | Ret
            | Set
            | Wait
            | Push Int
@@ -23,7 +45,6 @@ data Instr = For
            | Swap
            | Dup
            | Yield
-           | Tick Sym
            | FromA
            | ToA
            | FromR
@@ -37,252 +58,129 @@ data Instr = For
            | GreaterThen
            | LessThen
            | EqualTo
-           | IfElse
-           | Done deriving (Show, Eq)
+           | Begin
+           | Output
+           | Ever
+           | ToB
+           | FromB
+           | SetPWM
+           | LShift
+           | RShift
+           | Repeat
+           | Done deriving (Eq)
 
-addSymToProg sym (ProgState n mapping) = ProgState n $ M.insert sym n mapping 
+instance Show Instr where
+  show For   = "FOR_OPCODE"
+  show Dec   =  "DEC_OPCODE"
+  show Incr  =  "INCR_OPCODE"
+  show Call  =  "CALL_OPCODE"
+  show Loop  =  "LOOP_OPCODE"
+  show Ret   =  "RET_OPCODE"
+  show Done  =  "DONE_OPCODE"
+  show Set   =  "SET_OPCODE"
+  show Wait  =  "WAIT_OPCODE"
+  show Drop  =  "DROP_OPCODE"
+  show Swap  =  "SWAP_OPCODE"
+  show Dup   =  "DUP_OPCODE"
+  show ToA   =  "TOA_OPCODE"
+  show FromA =  "FROMA_OPCODE"
+  show ToR   =  "TOR_OPCODE"
+  show FromR =  "FROMR_OPCODE"
+  show Add   =  "ADD_OPCODE"
+  show Mult  =  "MULT_OPCODE"
+  show Mod   =  "MOD_OPCODE"
+  show Sub   =  "SUB_OPCODE"
+  show Nip   =  "NIP_OPCODE"
+  show If    =  "IF_OPCODE"
+  show GreaterThen =  "GT_OPCODE"
+  show LessThen =  "LT_OPCODE"
+  show EqualTo = "EQ_OPCODE"
+  show (Push n) = show n
+  show Begin = "BEGIN_OPCODE"
+  show Repeat = "REPEAT_OPCODE"
+  show Output = "OUTPUT_OPCODE"
+  show Yield = "YIELD_OPCODE"
+  show Ever = "EVER_OPCODE"
+  show ToB = "TOB_OPCODE"
+  show FromB = "FROMB_OPCODE"
+  show SetPWM = "SETPWM_OPCODE"
+  show LShift = "LSHIFT_OPCODE"
+  show RShift = "RSHIFT_OPCODE"
 
-nextLocation (Push _) = incrLoc 2
-nextLocation (Tick _) = incrLoc 2
-nextLocation instr = incrLoc 1
+instance Monoid CompState where
+  mempty = CompState "" 0 []
+  (CompState p o m) `mappend` (CompState p' o' m') =
+    CompState (p ++ p') (o + o') (m ++ m')
 
-incrLoc i = do
-  (ProgState n mapping) <- get
-  put $ ProgState (n + i) mapping
+type Prog = ReaderT (NameMap, Int)(Writer CompState) ()
 
-appendInstr = return . Just
-progToC :: Instr -> State ProgState (Maybe String)
-progToC For = appendInstr "FOR_OPCODE"
-progToC Dec = appendInstr "DEC_OPCODE"
-progToC Incr = appendInstr "INCR_OPCODE"
-progToC (Func sym) = return Nothing
-progToC Call = appendInstr "CALL_OPCODE"
-progToC (Tick sym) = do
-  (ProgState n mapping) <- get
-  case sym `M.lookup` mapping of
-    (Just location) -> do
-      Just pushLoc <- progToC (Push location)
-      return $ Just $ pushLoc
-    otherwise -> error $ "could not find: " ++ sym
-progToC Loop = appendInstr "LOOP_OPCODE"
-progToC Return = appendInstr "RET_OPCODE"
-progToC Done = appendInstr "DONE_OPCODE"
-progToC Set = appendInstr "SET_OPCODE"
-progToC Wait = appendInstr "WAIT_OPCODE"
-progToC Drop = appendInstr "DROP_OPCODE"
-progToC Swap = appendInstr "SWAP_OPCODE"
-progToC Dup = appendInstr "DUP_OPCODE"
-progToC Yield = appendInstr "YIELD_OPCODE"
-progToC ToA = appendInstr "TOA_OPCODE"
-progToC FromA = appendInstr "FROMA_OPCODE"
-progToC ToR = appendInstr "TOR_OPCODE"
-progToC FromR = appendInstr "FROMR_OPCODE"
-progToC Add = appendInstr "ADD_OPCODE"
-progToC Mult = appendInstr "MULT_OPCODE"
-progToC Mod = appendInstr "MOD_OPCODE"
-progToC Sub = appendInstr "SUB_OPCODE"
-progToC Nip = appendInstr "NIP_OPCODE"
-progToC If = appendInstr "IF_OPCODE"
-progToC GreaterThen = appendInstr "GT_OPCODE"
-progToC LessThen = appendInstr "LT_OPCODE"
-progToC EqualTo = appendInstr "EQ_OPCODE"
-progToC IfElse = appendInstr "IFELSE_OPCODE"
-progToC (Push n) = return $ Just $ show (lsb n) ++ ", " ++ show (msb n) where
+compileProg :: Prog -> String
+compileProg instrs = let
+  (CompState prog loc mapping) =
+    execWriter (runReaderT instrs (mapping, loc))
+  in header ++ start ++ prog ++ ", " ++ show Done ++ footer
+header = "#include <rgb.h>\n\n"
+start = "prog_uint16_t prog[1000] PROGMEM = {"
+footer = "};"
+
+addSymToProg = undefined --sym (CompState prog n mapping) = ProgState n $ M.insert sym n mapping 
+
+--nextLocation (Push _) = incrLoc 2
+--nextLocation (Tick _) = incrLoc 2
+--nextLocation instr = incrLoc 1
+
+--incrLoc i = do
+--  (ProgState n mapping) <- get
+--  put $ ProgState (n + i) mapping
+
+--appendInstr = return . Just
+
 msb n = shiftR (n .&. 0xFF00) 8
 lsb n = n .&. 0xFF
 
-makeFuncMap (Func sym) = modify $ addSymToProg sym
-makeFuncMap instr = nextLocation instr
+--makeFuncMap (Func sym) = modify $ addSymToProg sym
+--makeFuncMap instr = nextLocation instr
 
-data ProgState = ProgState Int (M.Map String Int)
-emptyProgState = ProgState 0 M.empty
+--secsToTicks secs = round $ 100 * secs
+--waitSeconds seconds = wait $ secsToTicks seconds
 
-secsToTicks secs = round $ 100 * secs
-waitSeconds seconds = wait $ secsToTicks seconds
+compileInstr :: Instr -> Prog
+compileInstr instr = do
+  (mapping, loc) <- ask
+  tell $ CompState (show instr ++ ", ") 0 mapping
+  
+(wait:forLoop:incr:dec:swap:dup:drop:loop:done:ret:set:callInstr:yield:toA:fromA:toR:[]) =
+  map compileInstr
+    [ Wait, For, Incr, Dec, Swap, Dup
+    , Drop, Loop, Done, Ret, Set, Call
+    , Yield, ToA, FromA, ToR]
+(fromR:add:sub:mult:mod:begin:repeatLoop:[]) =
+  map compileInstr
+  [ FromR, Add, Sub, Repeat, Begin, Mod, Mult]
+push n = compileInstr (Push n)
 
-wait 0 = []
-wait ticks = [Push ticks, Wait]
-waitInstr = [Wait]
-forInstr = [For]
-forN n = [Push n, For]
-incr n = [Push n, Incr]
-incrInstr = [Incr]
-dec n = [Push n, Dec]
-decInstr = [Dec]
-push n = [Push n]
-swapInstr = [Swap]
-dupInstr = [Dup]
-dropInstr = [Drop]
-loop = [Loop]
-done = [Done]
-func sym = [Func sym]
-ret = [Return]
-set n = [Push n, Set]
-setInstr = [Set]
-call sym = [Tick sym, Call]
-callInstr = [Call]
-yield = [Yield]
-tick sym = [Tick sym]
-toA = [ToA]
-fromA = [FromA]
-toR = [ToR]
-fromR = [FromR]
-add = [Add]
-sub = [Sub]
-mult = [Mult]
-mod = [Mod]
+func name = do
+  (mapping, loc) <- ask
+  tell $ CompState "" 0 (insert (name,loc) mapping)
 
-instrsToC :: [Instr] -> String
-instrsToC instrs = header ++ start ++ mid ++ end where
-  header = "#include <rgb.h>\n\n"
-  start = "prog_uint8_t prog[1000] PROGMEM = {"
-  prog = catMaybes $ evalState (prog' >> mapM progToC instrs) emptyProgState
-  prog' = mapM_ makeFuncMap instrs
-  mid = intercalate ", " prog 
-  end = "};"
+call name = do
+  env <- ask
+  let ~(Just loc) = lookup name (fst env)
+  push loc
+  callInstr
+
 
 main = do
-  args <- getArgs
-  case args of
-    (fileName:[]) -> do
-      contents <- readFile fileName
-      case P.parse ledLang "" contents of
-        Left err -> print err
-        Right prog -> putStrLn $ instrsToC $ prog
-    otherwise -> putStrLn $ instrsToC $ prog
+    print . compileProg $ prog
 
-symbol = P.oneOf "~`!@#$^&*()_-+={[}]|/\\\"':;?/>.<,"
-wordName = do
-  first <- P.letter
-  rest <- P.many (P.letter <|> P.digit <|> symbol)
-  P.spaces
-  return (first : rest)
+prog = do
+  func "test"
+  push 0
+  env <- ask
+  traceShow env $ begin
+  fromA
+  incr
+  call "test"
+  toA
+  repeatLoop
 
-simpleWord nam instr = P.string nam >> P.many1 P.space >> return [instr]
-callParser = simpleWord "call" Call
-forParser = simpleWord "for" For
-incrParser = simpleWord "incr" Incr
-decParser = simpleWord "dec" Dec
-funcParser = do
-  P.string ":" 
-  P.spaces
-  name <- wordName
-  P.spaces
-  return [Func name]
-loopParser =  simpleWord "loop" Loop
-returnParser = simpleWord ";" Return
-setParser = simpleWord "set" Set
-waitParser = simpleWord "wait" Wait
-pushParser = do
-  num <- P.many1 P.digit
-  P.spaces
-  return [Push (read num)]
-dropParser = simpleWord "drop" Drop
-swapParser =  simpleWord "swap" Swap
-dupParser =  simpleWord "dup" Dup
-yieldParser = simpleWord "yield" Yield
-tickParser = do
-  P.string "' " 
-  P.spaces
-  nam <- P.many1 (P.letter <|> P.digit <|> symbol)
-  P.spaces
-  return [Tick nam]
-fromAParser = simpleWord "a>" FromA
-toAParser = simpleWord ">a" ToA
-fromRParser = simpleWord "r>" FromR
-toRParser = simpleWord ">r" ToR
-addParser = simpleWord "+" Add
-subParser = simpleWord "-" Sub
-multParser = simpleWord "*" Mult
-modParser = simpleWord "%" Mod
-doneParser = simpleWord "done" Done
-nipParser = simpleWord "nip" Nip
-ifParser = simpleWord "if" If
-gtParser = simpleWord ">" GreaterThen
-ltParser = simpleWord "<" LessThen
-eqParser = simpleWord "=" EqualTo
-ifElseParser = simpleWord "ifelse" IfElse
-wordParser = do
-  nam <- P.many1 (P.letter <|> P.digit <|> symbol)
-  P.spaces
-  return [Tick nam, Call]
-ledLang :: P.Parser [Instr]
-ledLang = concat <$> P.many parseExpr
-parseExpr = foldl1 (<|>) $ map P.try
-  [
-    forParser, incrParser, decParser, callParser,
-    loopParser, returnParser, setParser, waitParser,
-    doneParser, dropParser, swapParser, dupParser,
-    yieldParser, tickParser, fromAParser, toAParser,
-    fromRParser, toRParser, addParser, subParser,
-    multParser, pushParser, modParser, nipParser,
-    ifParser, gtParser, ltParser, eqParser,
-    ifElseParser, funcParser, wordParser
-   ]
-
-prog = concat
-  [
-    tick "fadeAll", push 1, call "times",
-    done,
-
-    func "fadeAll",
-      tick "pushGreens", call "fadeEach",
-      tick "pushReds", call "fadeEach",
-      tick "pushBlues", call "fadeEach",
-    ret,
-
-    func "pushReds",
-      push 0,
-      push 3,
-      push 6,
-      push 9,
-      push 12,
-    ret,
-
-    func "pushGreens",
-      push 1,
-      push 4,
-      push 7,
-      push 10,
-      push 13,
-    ret,
-
-    func "pushBlues",
-      push 2,
-      push 5,
-      push 8,
-      push 11,
-      push 14,
-    ret,
-
-    --( word -- )
-    func "fadeEach",
-      forN 100,
-        dupInstr,
-        callInstr,
-        forN 4,
-          incr 1,
-        loop,
-        wait 1,
-      loop,
-      forN 100,
-        dupInstr,
-        callInstr,
-        forN 4,
-          dec 1,
-        loop,
-        wait 1,
-      loop,
-      dropInstr,
-    ret,
-
-    func "times",
-      forInstr,
-        dupInstr,
-        callInstr,
-      loop,
-      dropInstr,
-    ret,
-
-    done
-  ]

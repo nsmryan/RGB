@@ -6,6 +6,12 @@
 #define PRINT_RUN_TIME 0
 #define PRINT_STARTUP 1
 
+#define OP_2ARG(op) \
+      currentFiber.paramPtr--; \
+      arg = *currentFiber.paramPtr; \
+      arg2 = *(currentFiber.paramPtr - 1); \
+      *(currentFiber.paramPtr - 1) = arg2 op arg; \
+      currentFiber.instrPtr++;
 
 void Isr(void);
 bool inner();
@@ -16,10 +22,12 @@ int availableMemory();
 
 Fiber fibers[NUM_FIBERS];
 FiberRegisters currentFiber;
-Scheduler scheduler;
-Output outs[NUM_FIBERS];
-uint8 masks[9] = {0x00, 0x01, 0x03, 0x07, 0x0F, 0x1F, 0x3F, 0x7F, 0xFF};
-uint8 currentOutputs[NUM_SHIFT_REGS];
+
+volatile Scheduler scheduler;
+volatile Output outs[NUM_FIBERS];
+volatile uint8 currentOutputs[NUM_SHIFT_REGS];
+
+const uint8 masks[9] = {0x00, 0x01, 0x03, 0x07, 0x0F, 0x1F, 0x3F, 0x7F, 0xFF};
 
 uint16 indicatorLEDOn = true;
 
@@ -135,7 +143,6 @@ void loop()
       digitalWrite(13, (millis() / 1000) % 2 == 0);
     }
 
-    Serial.println("outputs");
     for (fiberNum = 0; fiberNum < NUM_FIBERS; fiberNum++)
     {
       scheduler.fiberIndex = fiberNum;
@@ -155,12 +162,15 @@ void loop()
     }
     //Serial.println();
 
-    //Serial.println("Current Output");
-    //for (i = 0; i < 2; i++)
+    //if ((millis() % 1000) == 0)
     //{
-    //  Serial.print((unsigned int)currentOutputs[2 - i - 1], HEX);
+    //  for (i = 0; i < NUM_SHIFT_REGS; i++)
+    //  {
+    //    Serial.print((unsigned int)currentOutputs[NUM_SHIFT_REGS - i - 1], HEX);
+    //    Serial.print(" ");
+    //  }
+    //  Serial.println("");
     //}
-    //Serial.println("");
 
     scheduler.done = true;
 
@@ -292,35 +302,19 @@ bool inner()
       break;
 
     case ADD_OPCODE:
-      currentFiber.paramPtr--;
-      arg = *currentFiber.paramPtr;
-      arg2 = *(currentFiber.paramPtr--);
-      *currentFiber.paramPtr = arg + arg2;
-      currentFiber.instrPtr++;
+      OP_2ARG(+)
       break;
 
     case SUB_OPCODE:
-      currentFiber.paramPtr--;
-      arg = *currentFiber.paramPtr;
-      arg2 = *(currentFiber.paramPtr - 1);
-      *(currentFiber.paramPtr - 1) = arg2 - arg;
-      currentFiber.instrPtr++;
+      OP_2ARG(-)
       break;
 
     case MULT_OPCODE:
-      currentFiber.paramPtr--;
-      arg = *currentFiber.paramPtr;
-      arg2 = *(currentFiber.paramPtr - 1);
-      *(currentFiber.paramPtr - 1) = arg * arg2;
-      currentFiber.instrPtr++;
+      OP_2ARG(*)
       break;
 
     case MOD_OPCODE:
-      currentFiber.paramPtr--;
-      arg = *currentFiber.paramPtr;
-      arg2 = *(currentFiber.paramPtr - 1);
-      *(currentFiber.paramPtr - 1) = arg2 % arg;
-      currentFiber.instrPtr++;
+      OP_2ARG(%)
       break;
 
     case NIP_OPCODE:
@@ -346,27 +340,15 @@ bool inner()
       break;
 
     case GT_OPCODE:
-      currentFiber.paramPtr--;
-      arg = *currentFiber.paramPtr;
-      arg2 = *(currentFiber.paramPtr - 1);
-      *(currentFiber.paramPtr - 1) = arg2 > arg;
-      currentFiber.instrPtr++;
+      OP_2ARG(>)
       break;
 
     case LT_OPCODE:
-      currentFiber.paramPtr--;
-      arg = *currentFiber.paramPtr;
-      arg2 = *(currentFiber.paramPtr - 1);
-      *(currentFiber.paramPtr - 1) = arg2 < arg;
-      currentFiber.instrPtr++;
+      OP_2ARG(<)
       break;
 
     case EQ_OPCODE:
-      currentFiber.paramPtr--;
-      arg = *currentFiber.paramPtr;
-      arg2 = *(currentFiber.paramPtr - 1);
-      *(currentFiber.paramPtr - 1) = arg2 == arg;
-      currentFiber.instrPtr++;
+      OP_2ARG(==)
       break;
 
     case EVER_OPCODE:
@@ -384,10 +366,6 @@ bool inner()
       currentFiber.instrPtr++;
       break;
 
-    case THEN_OPCODE:
-      currentFiber.instrPtr++;
-      break;
-
     case SET_PWM_OPCODE:
       currentFiber.paramPtr--;
       arg = *currentFiber.paramPtr;
@@ -396,18 +374,20 @@ bool inner()
       break;
 
     case LSHIFT_OPCODE:
-      currentFiber.paramPtr--;
-      arg = *currentFiber.paramPtr;
-      arg2 = *(currentFiber.paramPtr - 1);
-      *(currentFiber.paramPtr - 1) = arg2 << arg;
-      currentFiber.instrPtr++;
+      OP_2ARG(<<);
       break;
 
     case RSHIFT_OPCODE:
-      currentFiber.paramPtr--;
-      arg = *currentFiber.paramPtr;
-      arg2 = *(currentFiber.paramPtr - 1);
-      *(currentFiber.paramPtr - 1) = arg2 >> arg;
+      OP_2ARG(>>);
+      break;
+
+    case REPEAT_OPCODE:
+      currentFiber.instrPtr = (prog_uint16_t*)*(currentFiber.retPtr - 1);
+      break;
+
+    case BEGIN_OPCODE:
+      *currentFiber.retPtr = currentFiber.instrPtr;
+      currentFiber.retPtr++;
       currentFiber.instrPtr++;
       break;
 
@@ -478,17 +458,22 @@ void setPins()
   int bitIndex;
   int mux;
   char outBit;
+  int delayTime = 6;
+  char outputValue;
 
   //storage register low, clock low.
   CLEAR_PINS_0_7(STORCLK | SRCLK);
+  //delayMicroseconds(delayTime);
 
   for (shiftReg = 0; shiftReg < NUM_SHIFT_REGS; shiftReg++)
   {
+    outputValue = currentOutputs[NUM_SHIFT_REGS - shiftReg - 1];
+
     for (bitIndex = 0; bitIndex < 8; bitIndex++)
     {
       outBit = 1 &
-               (currentOutputs[NUM_SHIFT_REGS - shiftReg - 1] >>
-                8 - bitIndex - 1);
+               (outputValue  >>
+                (8 - bitIndex - 1));
 
       //Set serial input line.
       if (outBit)
@@ -499,17 +484,24 @@ void setPins()
       {
         CLEAR_PINS_0_7(SEROUT);
       }
+      //delayMicroseconds(delayTime);
 
       SET_PINS_0_7(SRCLK); //rising edge commits bit
+      //delayMicroseconds(delayTime);
       CLEAR_PINS_0_7(SRCLK); //go low on clock
+      //delayMicroseconds(delayTime);
 
       CLEAR_PINS_0_7(SEROUT); //from tutorial, prevents "bleed through"
+      //delayMicroseconds(delayTime);
     }
   }
 
   SET_PINS_0_7(OE);      //output off
+  //delayMicroseconds(delayTime);
   SET_PINS_0_7(STORCLK); //storage register commit bits
+  //delayMicroseconds(delayTime);
   CLEAR_PINS_0_7(OE);    //output enable
+  //delayMicroseconds(delayTime);
 }
 
 void Isr(void)
@@ -580,7 +572,6 @@ void Isr(void)
         ((output >> bitsUsed-bitsLeft) &
          masks[bitsLeft]);
       bitsUsed -= bitsLeft;
-      //output >>= bitsLeft;
       bitsLeft = 8;
       outputIndex--;
     }
