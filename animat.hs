@@ -2,6 +2,8 @@
 
 module Main where
 
+import Prelude hiding (drop)
+
 import Control.Monad
 import Control.Monad.Operational
 import Control.Monad.Trans
@@ -11,24 +13,24 @@ import Control.Monad.Writer.Lazy
 
 import Debug.Trace
 
+import System.Process
+
 import Data.Maybe
-import Data.List
+import qualified Data.List as L
 import Data.Bits
 import System.Environment
 import Control.Monad.State.Strict
 import Control.Applicative
---import qualified Data.Map as M
+import qualified Data.Map as M
 import qualified Text.ParserCombinators.Parsec as P
 
 type Sym = String
 
---type NameMap = M.Map String Int
-type NameMap = [(String, Int)]
+type NameMap = M.Map String Int
 
 data CompState = CompState 
                {
-                 compiledProgram :: String
-               , offset :: Int
+                 compiledProgram :: [CInstr]
                , nameMap :: NameMap
                } deriving (Show)
 
@@ -67,6 +69,9 @@ data Instr = For
            | LShift
            | RShift
            | Repeat
+           | Jmp
+           | FiberIndex
+           | NewFiber
            | Done deriving (Eq)
 
 instance Show Instr where
@@ -103,84 +108,134 @@ instance Show Instr where
   show Ever = "EVER_OPCODE"
   show ToB = "TOB_OPCODE"
   show FromB = "FROMB_OPCODE"
-  show SetPWM = "SETPWM_OPCODE"
+  show SetPWM = "SET_PWM_OPCODE"
   show LShift = "LSHIFT_OPCODE"
   show RShift = "RSHIFT_OPCODE"
+  show Jmp = "JMP_OPCODE"
+  show NewFiber = "NEW_FIBER_OPCODE"
+  show FiberIndex = "FIBER_INDEX_OPCODE"
+
+data CInstr = CInstr Instr
+            | Tick Sym
+
+instance Show CInstr where
+  show (CInstr instr) = show instr
+  show (Tick str) = "Label:" ++ str
 
 instance Monoid CompState where
-  mempty = CompState "" 0 []
-  (CompState p o m) `mappend` (CompState p' o' m') =
-    CompState (p ++ p') (o + o') (m ++ m')
+  mempty = CompState [] M.empty
+  (CompState p m) `mappend` (CompState p' m') =
+    CompState (p ++ p')  (m `mappend` m')
 
-type Prog = ReaderT (NameMap, Int)(Writer CompState) ()
+type Prog = StateT Int (Writer CompState) ()
+
+resolveName mapping (Tick name) =
+    case M.lookup name mapping of
+      Nothing -> error "Label " ++ name ++ " not found"
+      Just loc -> "(uint16)&prog[" ++ show loc ++ "]"
+resolveName mapping instr = show instr
 
 compileProg :: Prog -> String
 compileProg instrs = let
-  (CompState prog loc mapping) =
-    execWriter (runReaderT instrs (mapping, loc))
+  CompState comped mapping = execWriter (evalStateT instrs 0)
+  secondPass = map (resolveName mapping) comped
+  prog = L.intercalate ", " secondPass
   in header ++ start ++ prog ++ ", " ++ show Done ++ footer
 header = "#include <rgb.h>\n\n"
-start = "prog_uint16_t prog[1000] PROGMEM = {"
+start = "prog_uint16_t prog[2000] PROGMEM = {"
 footer = "};"
 
-addSymToProg = undefined --sym (CompState prog n mapping) = ProgState n $ M.insert sym n mapping 
-
---nextLocation (Push _) = incrLoc 2
---nextLocation (Tick _) = incrLoc 2
---nextLocation instr = incrLoc 1
-
---incrLoc i = do
---  (ProgState n mapping) <- get
---  put $ ProgState (n + i) mapping
-
---appendInstr = return . Just
-
-msb n = shiftR (n .&. 0xFF00) 8
+msb n = (shiftR n 8) .&. 0xFF 
 lsb n = n .&. 0xFF
-
---makeFuncMap (Func sym) = modify $ addSymToProg sym
---makeFuncMap instr = nextLocation instr
-
---secsToTicks secs = round $ 100 * secs
---waitSeconds seconds = wait $ secsToTicks seconds
 
 compileInstr :: Instr -> Prog
 compileInstr instr = do
-  (mapping, loc) <- ask
-  tell $ CompState (show instr ++ ", ") 0 mapping
+  modify succ
+  tell $ CompState [CInstr instr] M.empty
   
 (wait:forLoop:incr:dec:swap:dup:drop:loop:done:ret:set:callInstr:yield:toA:fromA:toR:[]) =
   map compileInstr
     [ Wait, For, Incr, Dec, Swap, Dup
     , Drop, Loop, Done, Ret, Set, Call
     , Yield, ToA, FromA, ToR]
-(fromR:add:sub:mult:mod:begin:repeatLoop:[]) =
+(fromR:add:sub:mult:modInstr:begin:repeatLoop:jmpInstr:fiberIndex:[]) =
   map compileInstr
-  [ FromR, Add, Sub, Repeat, Begin, Mod, Mult]
+    [ FromR, Add, Sub, Mult, Mod, Begin, Repeat, Jmp, FiberIndex]
+
+(ever:toB:fromB:setPWM:lshift:rshift:output:newFiber:[]) = 
+  map compileInstr
+    [Ever,ToB,FromB,SetPWM,LShift,RShift, Output, NewFiber]
+
 push n = compileInstr (Push n)
 
+tick name = do
+  modify succ
+  tell $ CompState [Tick name] M.empty
+
 func name = do
-  (mapping, loc) <- ask
-  tell $ CompState "" 0 (insert (name,loc) mapping)
+  loc <- get
+  tell $ CompState [] (M.singleton name loc)
 
 call name = do
-  env <- ask
-  let ~(Just loc) = lookup name (fst env)
-  push loc
+  tick name
   callInstr
+
+jmp name = do
+  tick name
+  jmpInstr
 
 
 main = do
-    print . compileProg $ prog
+  run prog
+
+run program = do
+  writeFile "prog.ino" (compileProg program)
+  runCommand "make upload"
 
 prog = do
-  func "test"
-  push 0
-  env <- ask
-  traceShow env $ begin
-  fromA
-  incr
-  call "test"
-  toA
+  tick "fading"; push 20; newFiber
+  tick "fading"; push 20; newFiber
+  tick "fading"; push 20; newFiber
+  tick "fading"; push 20; newFiber
+  tick "fading"; push 20; newFiber
+  tick "fading"; push 20; newFiber
+  done
+
+  func "fading"
+  fiberIndex; push 20; mult; wait
+  begin;
+    push 0; push 20; forLoop;
+      dup; fiberIndex; setPWM; incr; push 1; wait;
+    loop;
+    push 20; forLoop;
+      dup; fiberIndex; setPWM; dec; push 1; wait;
+    loop;
+    drop; incr; push 8; modInstr; dup; fiberIndex; output;
   repeatLoop
+  done
+
+allColors = do
+  tick "allColors"; push 40; newFiber
+  tick "allColors"; push 40; newFiber
+  tick "allColors"; push 40; newFiber
+  tick "allColors"; push 40; newFiber
+  tick "allColors"; push 40; newFiber
+
+  func "allColors"
+  begin;
+    push 1; fiberIndex; push 3; mult; add; setPWM;
+    push 1; fiberIndex; push 3; mult; add; output;
+    done;
+    push 1; push 1; call "output";
+    push 0; push 20; forLoop;
+      incr; dup; push 1; fiberIndex; push 3; mult; add; incr; setPWM;
+      push 1; wait;
+    loop; drop;
+  repeatLoop
+
+  func "output";
+    fiberIndex; push 3; mult; add; incr; output; 
+
+  func "doNothing"
+  done;
 

@@ -5,6 +5,7 @@
 
 #define PRINT_RUN_TIME 0
 #define PRINT_STARTUP 1
+#define FIBERS 1
 
 #define OP_2ARG(op) \
       currentFiber.paramPtr--; \
@@ -14,26 +15,34 @@
       currentFiber.instrPtr++;
 
 void Isr(void);
-bool inner();
+void inner();
 void setPins();
 void printFiber(int fiberNum);
 void printFibers();
 int availableMemory();
 
-Fiber fibers[NUM_FIBERS];
+Fiber *fibers[MAX_NUM_FIBERS];
+uint16 numFibers = 1;
 FiberRegisters currentFiber;
 
 volatile Scheduler scheduler;
-volatile Output outs[NUM_FIBERS];
-volatile uint8 currentOutputs[NUM_SHIFT_REGS];
+volatile Output outs[NUM_OUTPUTS];
+volatile Output currentOuts[NUM_OUTPUTS];
+volatile uint8 currentOutputs[NUM_OUTPUTS];
+uint8 shiftRegisterOutputs[NUM_OUTPUTS];
 
 const uint8 masks[9] = {0x00, 0x01, 0x03, 0x07, 0x0F, 0x1F, 0x3F, 0x7F, 0xFF};
 
 uint16 indicatorLEDOn = true;
 
-extern prog_uint16_t prog_segments[NUM_FIBERS][PROG_SIZE] PROGMEM;
-extern prog_uint16_t fiberOffset[NUM_FIBERS] PROGMEM;
-extern prog_uint8_t fiberBitsUsed[NUM_FIBERS] PROGMEM;
+extern prog_uint16_t prog[PROG_SIZE] PROGMEM;
+extern prog_uint8_t outputBits[NUM_OUTPUTS] PROGMEM;
+
+prog_uint8_t outputBits[NUM_OUTPUTS] PROGMEM = 
+  {
+    1, 3, 3, 3, 3, 3
+    //1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
+  };
 
 //TODO
 //macros for opcode defs
@@ -44,6 +53,7 @@ extern prog_uint8_t fiberBitsUsed[NUM_FIBERS] PROGMEM;
 void setup()
 {
   int fiberIndex;
+  int outputIndex;
 
   pinMode(13, OUTPUT);
   digitalWrite(13, HIGH);
@@ -67,19 +77,16 @@ void setup()
   Serial.begin(9600);
 
   //TODO change to load from EEEPROM
+  fibers[0] = (Fiber*)malloc(sizeof(Fiber));
+  fibers[0]->registers.instrPtr = (prog_uint16_t*)&prog[0];
+  fibers[0]->registers.retPtr = (prog_uint16_t**)malloc(DEFAULT_PS_SIZE);
+  fibers[0]->registers.paramPtr = (uint16*)malloc(DEFAULT_RS_SIZE);
+  fibers[0]->registers.regA = 0;
+  fibers[0]->registers.regB = 0;
 
-  for (fiberIndex = 0; fiberIndex < NUM_FIBERS; fiberIndex++)
+  for (outputIndex = 0; outputIndex < NUM_OUTPUTS; outputIndex++)
   {
-    fibers[fiberIndex].registers.instrPtr = (prog_uint16_t*)pgm_read_word(&fiberOffset[fiberIndex]);
-    fibers[fiberIndex].registers.retPtr = &fibers[fiberIndex].state.retStack[0];
-    fibers[fiberIndex].registers.paramPtr = &fibers[fiberIndex].state.paramStack[0];
-    fibers[fiberIndex].registers.regA = 0;
-    fibers[fiberIndex].registers.regB = 0;
-    fibers[fiberIndex].registers.output = 0;
-    fibers[fiberIndex].registers.pwm = 0;
-
-    outs[fiberIndex].pwm = 0;
-    outs[fiberIndex].output = 0;
+    currentOutputs[outputIndex] = 0;
   }
 
   Timer1.initialize(PERIOD_US);
@@ -143,30 +150,33 @@ void loop()
       digitalWrite(13, (millis() / 1000) % 2 == 0);
     }
 
-    for (fiberNum = 0; fiberNum < NUM_FIBERS; fiberNum++)
+#if FIBERS
+    for (fiberNum = 0; fiberNum < numFibers; fiberNum++)
     {
       scheduler.fiberIndex = fiberNum;
 
       memcpy(&currentFiber,
-             &fibers[fiberNum].registers,
+             &fibers[fiberNum]->registers,
              sizeof(FiberRegisters));
 
-      while (inner());
+      inner();
 
-      memcpy(&fibers[fiberNum].registers,
+      memcpy(&fibers[fiberNum]->registers,
              &currentFiber,
              sizeof(FiberRegisters));
       //printFiber(fiberNum);
       //Serial.println();
       //Serial.print(outs[fiberNum].output);
     }
+#endif
     //Serial.println();
 
     //if ((millis() % 1000) == 0)
     //{
-    //  for (i = 0; i < NUM_SHIFT_REGS; i++)
+    //  uint8 arr[6] = {1, 2, 3, 4, 5, 6};
+    //  for (i = 0; i < 6; i++)
     //  {
-    //    Serial.print((unsigned int)currentOutputs[NUM_SHIFT_REGS - i - 1], HEX);
+    //    Serial.print(*(uint16*)&arr[i], HEX);
     //    Serial.print(" ");
     //  }
     //  Serial.println("");
@@ -183,221 +193,244 @@ void loop()
   //interrupt wakes us up.
 }
 
-bool inner()
+void inner()
 {
   uint16 arg, arg2;
-  uint16 opcode = pgm_read_word(currentFiber.instrPtr);
+  uint16 opcode;
 
-  switch (opcode)
+  while (true)
   {
-    case DONE_OPCODE:
-      return false;
-      break;
+    opcode = pgm_read_word(currentFiber.instrPtr);
 
-    case RET_OPCODE:
-      currentFiber.retPtr--;
-      currentFiber.instrPtr = *currentFiber.retPtr;
-      break;
+    switch (opcode)
+    {
+      case DONE_OPCODE:
+        return;
+        break;
 
-    case LOOP_OPCODE:
-      arg = (uint16)*(currentFiber.retPtr - 1);
-      if (arg == 0)
-      {
+      case RET_OPCODE:
+        currentFiber.instrPtr = RS_POP();
+        break;
+
+      case LOOP_OPCODE:
+        arg = (uint16)RS_PEEK();
+        if (arg == 0)
+        {
+          currentFiber.instrPtr++;
+          currentFiber.retPtr -= 2;
+        }
+        else
+        {
+          *(currentFiber.retPtr - 1) = (prog_uint16_t*)(arg-1);
+          currentFiber.instrPtr = (prog_uint16_t*)*(currentFiber.retPtr - 2);
+        }
+        break;
+
+      case FOR_OPCODE:
+        arg = PS_POP();
         currentFiber.instrPtr++;
-        currentFiber.retPtr -= 2;
-      }
-      else
-      {
-        *(currentFiber.retPtr - 1) = (prog_uint16_t*)(arg-1);
-        currentFiber.instrPtr = (prog_uint16_t*)*(currentFiber.retPtr - 2);
-      }
-      break;
+        RS_PUSH(currentFiber.instrPtr);
+        RS_PUSH((prog_uint16_t*)arg);
+        break;
 
-    case FOR_OPCODE:
-      currentFiber.paramPtr--;
-      arg = *currentFiber.paramPtr;
-      currentFiber.instrPtr++;
-      *currentFiber.retPtr = currentFiber.instrPtr;
-      currentFiber.retPtr++;
-      *currentFiber.retPtr = (prog_uint16_t*)arg;
-      currentFiber.retPtr++;
-      break;
+      case CALL_OPCODE:
+        arg = PS_POP();
+        RS_PUSH(currentFiber.instrPtr + 1);
+        currentFiber.instrPtr = (prog_uint16_t*)arg;
+        break;
 
-    case CALL_OPCODE:
-      currentFiber.paramPtr--;
-      arg = *currentFiber.paramPtr;
-      *currentFiber.retPtr = currentFiber.instrPtr + 1;
-      currentFiber.retPtr++;
-      currentFiber.instrPtr = (prog_uint16_t*)arg;
-      break;
+      case INCR_OPCODE:
+        PS_SET(PS_PEEK()+1);
+        currentFiber.instrPtr++;
+        break;
 
-    case INCR_OPCODE:
-      arg = *(currentFiber.paramPtr-1);
-      *(currentFiber.paramPtr-1) = arg+1;
-      currentFiber.instrPtr++;
-      break;
+      case DEC_OPCODE:
+        PS_SET(PS_PEEK()-1);
+        currentFiber.instrPtr++;
+        break;
 
-    case DEC_OPCODE:
-      arg = *(currentFiber.paramPtr-1);
-      *(currentFiber.paramPtr-1) = arg-1;
-      currentFiber.instrPtr++;
-      break;
+      case OUTPUT_OPCODE:
+        arg = PS_POP();
+        arg2 = PS_POP();
+        outs[arg].output = arg2;
+        currentFiber.instrPtr++;
+        break;
 
-    case OUTPUT_OPCODE:
-      currentFiber.paramPtr--;
-      arg = *currentFiber.paramPtr;
-      currentFiber.output = arg;
-      currentFiber.instrPtr++;
-      break;
+      case WAIT_OPCODE:
+        arg = *(currentFiber.paramPtr-1);
+        if (arg == 0)
+        {
+          currentFiber.paramPtr--;
+          currentFiber.instrPtr++;
+        }
+        else
+        {
+          *(currentFiber.paramPtr-1) = arg-1;
+        }
+        return;
+        break;
 
-    case WAIT_OPCODE:
-      arg = *(currentFiber.paramPtr-1);
-      if (arg == 0)
-      {
+      case DUP_OPCODE:
+        arg = *(currentFiber.paramPtr - 1);
+        *currentFiber.paramPtr = arg;
+        currentFiber.paramPtr++;
+        currentFiber.instrPtr++;
+        break;
+
+      case DROP_OPCODE:
         currentFiber.paramPtr--;
         currentFiber.instrPtr++;
-      }
-      else
-      {
-        *(currentFiber.paramPtr-1) = arg-1;
-      }
-      return false;
-      break;
+        break;
 
-    case DUP_OPCODE:
-      arg = *(currentFiber.paramPtr - 1);
-      *currentFiber.paramPtr = arg;
-      currentFiber.paramPtr++;
-      currentFiber.instrPtr++;
-      break;
-
-    case DROP_OPCODE:
-      currentFiber.paramPtr--;
-      currentFiber.instrPtr++;
-      break;
-
-    case SWAP_OPCODE:
-      arg = *(currentFiber.paramPtr - 1);
-      *(currentFiber.paramPtr - 1) = *(currentFiber.paramPtr - 2);
-      *(currentFiber.paramPtr - 2) = arg;
-      currentFiber.instrPtr++;
-      break;
-
-    case YIELD_OPCODE:
-      currentFiber.instrPtr++;
-      return false;
-      break;
-
-    case TOA_OPCODE:
-      arg = *(--currentFiber.paramPtr);
-      currentFiber.regA = arg;
-      currentFiber.instrPtr++;
-      break;
-
-    case FROMA_OPCODE:
-      arg = currentFiber.regA;
-      *currentFiber.paramPtr = arg;
-      currentFiber.paramPtr++;
-      currentFiber.instrPtr++;
-      break;
-
-    case ADD_OPCODE:
-      OP_2ARG(+)
-      break;
-
-    case SUB_OPCODE:
-      OP_2ARG(-)
-      break;
-
-    case MULT_OPCODE:
-      OP_2ARG(*)
-      break;
-
-    case MOD_OPCODE:
-      OP_2ARG(%)
-      break;
-
-    case NIP_OPCODE:
-      currentFiber.paramPtr--;
-      arg = *currentFiber.paramPtr;
-      *(currentFiber.paramPtr - 1) = arg;
-      currentFiber.instrPtr++;
-      break;
-
-    case IF_OPCODE:
-      currentFiber.paramPtr--;
-      arg = *currentFiber.paramPtr;
-      currentFiber.paramPtr--;
-      arg2 = *currentFiber.paramPtr;
-      if (arg2)
-      {
+      case SWAP_OPCODE:
+        arg = *(currentFiber.paramPtr - 1);
+        *(currentFiber.paramPtr - 1) = *(currentFiber.paramPtr - 2);
+        *(currentFiber.paramPtr - 2) = arg;
         currentFiber.instrPtr++;
-      }
-      else
-      {
-        currentFiber.instrPtr += arg;
-      }
+        break;
+
+      case YIELD_OPCODE:
+        currentFiber.instrPtr++;
+        return;
+        break;
+
+      case TOA_OPCODE:
+        arg = *(--currentFiber.paramPtr);
+        currentFiber.regA = arg;
+        currentFiber.instrPtr++;
+        break;
+
+      case FROMA_OPCODE:
+        arg = currentFiber.regA;
+        *currentFiber.paramPtr = arg;
+        currentFiber.paramPtr++;
+        currentFiber.instrPtr++;
+        break;
+
+      case ADD_OPCODE:
+        OP_2ARG(+)
+        break;
+
+      case SUB_OPCODE:
+        OP_2ARG(-)
+        break;
+
+      case MULT_OPCODE:
+        OP_2ARG(*)
+        break;
+
+      case MOD_OPCODE:
+        OP_2ARG(%)
+        break;
+
+      case NIP_OPCODE:
+        arg = PS_POP();
+        *(currentFiber.paramPtr - 1) = arg;
+        currentFiber.instrPtr++;
+        break;
+
+      case IF_OPCODE:
+        arg = PS_POP();
+        arg2 = PS_POP();
+        if (arg2)
+        {
+          currentFiber.instrPtr++;
+        }
+        else
+        {
+          currentFiber.instrPtr += arg;
+        }
+        break;
+
+      case GT_OPCODE:
+        OP_2ARG(>)
+        break;
+
+      case LT_OPCODE:
+        OP_2ARG(<)
+        break;
+
+      case EQ_OPCODE:
+        OP_2ARG(==)
+        break;
+
+      case EVER_OPCODE:
+        currentFiber.instrPtr = (prog_uint16_t*)*(currentFiber.retPtr - 2);
+        break;
+
+      case TOB_OPCODE:
+        arg = PS_POP();
+        currentFiber.regB = arg;
+        currentFiber.instrPtr++;
+        break;
+
+      case FROMB_OPCODE:
+        PS_PUSH(currentFiber.regB);
+        currentFiber.instrPtr++;
+        break;
+
+      case SET_PWM_OPCODE:
+        arg = PS_POP();
+        arg2 = PS_POP();
+        outs[arg].pwm = arg2;
+        currentFiber.instrPtr++;
+        break;
+
+      case LSHIFT_OPCODE:
+        OP_2ARG(<<);
+        break;
+
+      case RSHIFT_OPCODE:
+        OP_2ARG(>>);
+        break;
+
+      case REPEAT_OPCODE:
+        currentFiber.instrPtr = RS_PEEK();
+        break;
+
+      case BEGIN_OPCODE:
+        RS_PUSH(currentFiber.instrPtr+1);
+        currentFiber.instrPtr++;
+        break;
+
+      case FIBER_INDEX_OPCODE:
+        PS_PUSH(scheduler.fiberIndex);
+        currentFiber.instrPtr++;
+        break;
+
+      case JMP_OPCODE:
+        currentFiber.instrPtr = (prog_uint16_t*)PS_POP();
+        break;
+
+      case NEW_FIBER_OPCODE:
+        arg = PS_POP();  //stack size
+        arg2 = PS_POP(); //entry point
+        if (numFibers > MAX_NUM_FIBERS)
+        {
+          PS_PUSH(0);
+        }
+        else
+        {
+          fibers[numFibers] = (Fiber*)malloc(sizeof(Fiber));
+          fibers[numFibers]->registers.retPtr = (prog_uint16_t**)malloc(arg*sizeof(uint16));
+          fibers[numFibers]->registers.paramPtr = (uint16*)malloc(arg*sizeof(uint16));
+          fibers[numFibers]->registers.instrPtr = (prog_uint16_t*)arg2;
+          fibers[numFibers]->registers.regA = 0;
+          fibers[numFibers]->registers.regB = 0;
+          PS_PUSH((uint16)fibers[numFibers]);
+          numFibers++;
+        }
+        currentFiber.instrPtr++;
+        break;
       break;
 
-    case GT_OPCODE:
-      OP_2ARG(>)
-      break;
-
-    case LT_OPCODE:
-      OP_2ARG(<)
-      break;
-
-    case EQ_OPCODE:
-      OP_2ARG(==)
-      break;
-
-    case EVER_OPCODE:
-      currentFiber.instrPtr = (prog_uint16_t*)*(currentFiber.retPtr - 2);
-      break;
-
-    case TOB_OPCODE:
-      arg = *(--currentFiber.paramPtr);
-      currentFiber.regB = arg;
-      currentFiber.instrPtr++;
-      break;
-
-    case FROMB_OPCODE:
-      *(currentFiber.paramPtr++) = currentFiber.regB;
-      currentFiber.instrPtr++;
-      break;
-
-    case SET_PWM_OPCODE:
-      currentFiber.paramPtr--;
-      arg = *currentFiber.paramPtr;
-      currentFiber.pwm = arg;
-      currentFiber.instrPtr++;
-      break;
-
-    case LSHIFT_OPCODE:
-      OP_2ARG(<<);
-      break;
-
-    case RSHIFT_OPCODE:
-      OP_2ARG(>>);
-      break;
-
-    case REPEAT_OPCODE:
-      currentFiber.instrPtr = (prog_uint16_t*)*(currentFiber.retPtr - 1);
-      break;
-
-    case BEGIN_OPCODE:
-      *currentFiber.retPtr = currentFiber.instrPtr;
-      currentFiber.retPtr++;
-      currentFiber.instrPtr++;
-      break;
-
-    default:
-      *currentFiber.paramPtr = opcode;
-      currentFiber.paramPtr++;
-      currentFiber.instrPtr++;
+      default:
+        *currentFiber.paramPtr = opcode;
+        currentFiber.paramPtr++;
+        currentFiber.instrPtr++;
+        break;
+    }
   }
-
-  return true;
 }
 
 void printFiber(int fiberNum)
@@ -408,34 +441,32 @@ void printFiber(int fiberNum)
   Serial.print(fiberNum);
   Serial.println(":");
   Serial.print("ps = ");
-  Serial.print((uint16)fibers[fiberNum].registers.paramPtr);
+  Serial.print((uint16)fibers[fiberNum]->registers.paramPtr);
   Serial.print(" rs = ");
-  Serial.print((uint16)fibers[fiberNum].registers.retPtr);
+  Serial.print((uint16)fibers[fiberNum]->registers.retPtr);
   Serial.print(" ip = ");
-  Serial.print((uint16)fibers[fiberNum].registers.instrPtr);
-  Serial.print(" output = ");
-  Serial.println((uint16)fibers[fiberNum].registers.output);
+  Serial.print((uint16)fibers[fiberNum]->registers.instrPtr);
 
-  for (stackIndex = 0; stackIndex < PS_STACK_DEPTH; stackIndex++)
-  {
-    Serial.print(" ");
-    Serial.print(fibers[fiberNum].state.paramStack[stackIndex]);
-  }
+  //for (stackIndex = 0; stackIndex < PS_STACK_DEPTH; stackIndex++)
+  //{
+  //  Serial.print(" ");
+  //  Serial.print(fibers[fiberNum]->state.paramStack[stackIndex]);
+  //}
 
   Serial.println();
 
-  for (stackIndex = 0; stackIndex < RS_STACK_DEPTH; stackIndex++)
-  {
-    Serial.print(" ");
-    Serial.print((uint16)fibers[fiberNum].state.retStack[stackIndex]);
-  }
+  //for (stackIndex = 0; stackIndex < RS_STACK_DEPTH; stackIndex++)
+  //{
+  //  Serial.print(" ");
+  //  Serial.print((uint16)fibers[fiberNum]->state.retStack[stackIndex]);
+  //}
 }
 
 void printFibers()
 {
   int fiberIndex;
 
-  for (fiberIndex = 0; fiberIndex < NUM_FIBERS; fiberIndex++)
+  for (fiberIndex = 0; fiberIndex < numFibers; fiberIndex++)
   {
     printFiber(fiberIndex);
     Serial.println();
@@ -463,11 +494,10 @@ void setPins()
 
   //storage register low, clock low.
   CLEAR_PINS_0_7(STORCLK | SRCLK);
-  //delayMicroseconds(delayTime);
 
   for (shiftReg = 0; shiftReg < NUM_SHIFT_REGS; shiftReg++)
   {
-    outputValue = currentOutputs[NUM_SHIFT_REGS - shiftReg - 1];
+    outputValue = shiftRegisterOutputs[NUM_SHIFT_REGS - shiftReg - 1];
 
     for (bitIndex = 0; bitIndex < 8; bitIndex++)
     {
@@ -484,30 +514,24 @@ void setPins()
       {
         CLEAR_PINS_0_7(SEROUT);
       }
-      //delayMicroseconds(delayTime);
 
       SET_PINS_0_7(SRCLK); //rising edge commits bit
-      //delayMicroseconds(delayTime);
       CLEAR_PINS_0_7(SRCLK); //go low on clock
-      //delayMicroseconds(delayTime);
 
       CLEAR_PINS_0_7(SEROUT); //from tutorial, prevents "bleed through"
-      //delayMicroseconds(delayTime);
     }
   }
 
   SET_PINS_0_7(OE);      //output off
-  //delayMicroseconds(delayTime);
   SET_PINS_0_7(STORCLK); //storage register commit bits
-  //delayMicroseconds(delayTime);
   CLEAR_PINS_0_7(OE);    //output enable
-  //delayMicroseconds(delayTime);
 }
 
 void Isr(void)
 {
-  int fiberIndex;
+  char i;
   char shiftIndex;
+  char fiberIndex;
   char outputIndex;
   char bitsUsed;
   char bitsLeft;
@@ -530,22 +554,22 @@ void Isr(void)
       scheduler.subframes = 0;
     }
 
-    for (fiberIndex = 0; fiberIndex < NUM_FIBERS; fiberIndex++)
+    for (outputIndex = 0; outputIndex < NUM_OUTPUTS; outputIndex++)
     {
-      outs[fiberIndex].pwm    = fibers[fiberIndex].registers.pwm;
-      outs[fiberIndex].output = fibers[fiberIndex].registers.output;
+      currentOuts[outputIndex].output = outs[outputIndex].output;
+      currentOuts[outputIndex].pwm = outs[outputIndex].pwm;
     }
   }
 
   outputIndex = NUM_SHIFT_REGS - 1;
   bitsLeft = 8;
-  for (fiberIndex = 0; fiberIndex < NUM_FIBERS; fiberIndex++)
+  for (i = 0; i < NUM_OUTPUTS; i++)
   {
-    bitsUsed = (uint16)pgm_read_word(&fiberBitsUsed[fiberIndex]);
+    bitsUsed = (uint16)pgm_read_word(&outputBits[i]);
 
     if (bitsUsed == 0)
     {
-      //Fiber doesn't use any output bits.
+      //Output doesn't use any output bits.
       continue;
     }
 
@@ -557,18 +581,18 @@ void Isr(void)
       //filling them with 0s.
       bitsUsed &= MASK_OUT_SKIP_BIT;
     }
-    else if (scheduler.ticks < outs[fiberIndex].pwm)
+    else if (scheduler.ticks < currentOuts[i].pwm)
     {
-      //Fiber is currently "on" in PWM cycle.
-      output = outs[fiberIndex].output;
+      //Output is currently "on" in PWM cycle.
+      output = currentOuts[i].output;
     }
     //else use the default output of 0.
 
     //fit bitsUsed into outputs.
     while (bitsUsed > bitsLeft)
     {
-      currentOutputs[outputIndex] <<= bitsLeft;
-      currentOutputs[outputIndex] |=
+      shiftRegisterOutputs[outputIndex] <<= bitsLeft;
+      shiftRegisterOutputs[outputIndex] |=
         ((output >> bitsUsed-bitsLeft) &
          masks[bitsLeft]);
       bitsUsed -= bitsLeft;
@@ -580,8 +604,8 @@ void Isr(void)
     if (bitsUsed != 0)
     {
       //partial output byte left to fill.
-      currentOutputs[outputIndex] <<= bitsUsed;
-      currentOutputs[outputIndex] |= (output & masks[bitsUsed]);
+      shiftRegisterOutputs[outputIndex] <<= bitsUsed;
+      shiftRegisterOutputs[outputIndex] |= (output & masks[bitsUsed]);
       bitsLeft -= bitsUsed;
     }
 

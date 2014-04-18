@@ -2,7 +2,8 @@
 #define PERIOD_US 1000
 #define DUTY_CYCLE_RESOLUTION 20
 #define FRAMES_PER_SECOND (PERIOD_HZ / DUTY_CYCLE_RESOLUTION)
-#define NUM_FIBERS 6
+#define MAX_NUM_FIBERS  20
+#define NUM_OUTPUTS 6
 #define NUM_PINS_PER_MUX 8
 #define LED_OFF 0
 #define LED_ON DUTY_CYCLE_RESOLUTION
@@ -73,50 +74,69 @@
 
 #define PROG_SIZE 100
 
-#define DONE_OPCODE    (OPCODE_BIT | 0)
-#define RET_OPCODE     (OPCODE_BIT | 1)
-#define LOOP_OPCODE    (OPCODE_BIT | 2)
-#define FOR_OPCODE     (OPCODE_BIT | 3)
-#define CALL_OPCODE    (OPCODE_BIT | 4)
-#define INCR_OPCODE    (OPCODE_BIT | 5)
-#define DEC_OPCODE     (OPCODE_BIT | 6)
-#define OUTPUT_OPCODE  (OPCODE_BIT | 7)
-#define WAIT_OPCODE    (OPCODE_BIT | 8)
-#define DUP_OPCODE     (OPCODE_BIT | 9)
-#define DROP_OPCODE    (OPCODE_BIT | 10)
-#define SWAP_OPCODE    (OPCODE_BIT | 11)
-#define YIELD_OPCODE   (OPCODE_BIT | 12)
-#define TOA_OPCODE     (OPCODE_BIT | 13)
-#define FROMA_OPCODE   (OPCODE_BIT | 14)
-#define TOR_OPCODE     (OPCODE_BIT | 15)
-#define FROMR_OPCODE   (OPCODE_BIT | 16)
-#define ADD_OPCODE     (OPCODE_BIT | 17)
-#define SUB_OPCODE     (OPCODE_BIT | 18)
-#define MULT_OPCODE    (OPCODE_BIT | 19)
-#define MOD_OPCODE     (OPCODE_BIT | 20)
-#define NIP_OPCODE     (OPCODE_BIT | 21)
-#define IF_OPCODE      (OPCODE_BIT | 22)
-#define GT_OPCODE      (OPCODE_BIT | 23)
-#define LT_OPCODE      (OPCODE_BIT | 24)
-#define EQ_OPCODE      (OPCODE_BIT | 25)
-#define EVER_OPCODE    (OPCODE_BIT | 26)
-#define TOB_OPCODE     (OPCODE_BIT | 27)
-#define FROMB_OPCODE   (OPCODE_BIT | 28)
 
-#define SET_PWM_OPCODE (OPCODE_BIT | 30)
-#define LSHIFT_OPCODE  (OPCODE_BIT | 31)
-#define RSHIFT_OPCODE  (OPCODE_BIT | 32)
-#define REPEAT_OPCODE  (OPCODE_BIT | 33)
-#define BEGIN_OPCODE   (OPCODE_BIT | 34)
+#define DEFAULT_PS_SIZE 50
+#define DEFAULT_RS_SIZE 50
 
-#define PS_STACK_DEPTH 50
-#define RS_STACK_DEPTH 50
+#define PS_PUSH(x)     (*(currentFiber.paramPtr++) = x)
+#define PS_POP()       (*(--currentFiber.paramPtr))
+#define PS_PEEK()      (*(currentFiber.paramPtr-1))
+#define PS_PEEK_NTH(n) (*(currentFiber.paramPtr-n-1))
+#define PS_SET(n)      (*(currentFiber.paramPtr-1) = n)
+
+#define RS_PUSH(x)     (*(currentFiber.retPtr++) = x)
+#define RS_POP()       (*(--currentFiber.retPtr))
+#define RS_PEEK()      (*(currentFiber.retPtr-1))
+#define RS_PEEK_NTH(n) (*(currentFiber.retPtr-n-1))
+#define RS_SET(n)      (*(currentFiber.retPtr-1) = n)
 
 
 typedef char uint8;
 typedef unsigned int uint16;
 typedef int int16;
 
+
+typedef enum
+{
+  DONE_OPCODE = OPCODE_BIT,
+  RET_OPCODE,
+  LOOP_OPCODE,
+  FOR_OPCODE,
+  CALL_OPCODE,
+  INCR_OPCODE,
+  DEC_OPCODE,
+  OUTPUT_OPCODE,
+  WAIT_OPCODE,
+  DUP_OPCODE,
+  DROP_OPCODE,
+  SWAP_OPCODE,
+  YIELD_OPCODE,
+  TOA_OPCODE,
+  FROMA_OPCODE,
+  TOR_OPCODE,
+  FROMR_OPCODE,
+  ADD_OPCODE,
+  SUB_OPCODE,
+  MULT_OPCODE,
+  MOD_OPCODE,
+  NIP_OPCODE,
+  IF_OPCODE,
+  GT_OPCODE,
+  LT_OPCODE,
+  EQ_OPCODE,
+  EVER_OPCODE,
+  TOB_OPCODE,
+  FROMB_OPCODE,
+  SET_PWM_OPCODE,
+  LSHIFT_OPCODE,
+  RSHIFT_OPCODE,
+  REPEAT_OPCODE,
+  BEGIN_OPCODE,
+  FIBER_INDEX_OPCODE,
+  JMP_OPCODE,
+  NEW_FIBER_OPCODE,
+  NUM_OPCODES
+} OPCODE_ENUM;
 
 typedef struct
 {
@@ -131,8 +151,8 @@ typedef struct
 
 typedef struct
 {
-  prog_uint16_t *retStack[RS_STACK_DEPTH];
-  uint16 paramStack[PS_STACK_DEPTH];
+  prog_uint16_t **retStack;
+  uint16 *paramStack;
 } FiberState;
 
 typedef struct
@@ -148,8 +168,6 @@ typedef struct
   uint16 *paramPtr;
   uint16 regA;
   uint16 regB;
-  uint16  output;
-  uint8  pwm;
 } FiberRegisters;
 
 typedef struct
